@@ -1,0 +1,25 @@
+{
+  "name": "conductor-cli",
+  "version": "0.1.0",
+  "description": "Unofficial command-line client for the Conductor beta API, with TOON output for coding agents",
+  "type": "module",
+  "license": "MIT",
+  "repository": "github:Laurens-Nys/conductor-cli",
+  "bin": {
+    "conductor-cli": "bin/conductor-cli.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "skills"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@toon-format/toon": "^4.1.0"
+  }
+}
