@@ -381,9 +381,23 @@ function contentText(content) {
   if (!content || typeof content !== "object") return ""
   if (typeof content.message === "string") return content.message
   const parts = []
+  // Claude sessions: assistant payloads carry message.content[] blocks.
   for (const item of content.rawPayload?.message?.content ?? []) {
     if (item.type === "text" && item.text) parts.push(item.text)
     if (item.type === "tool_use") parts.push(`[${item.name}]`)
+  }
+  // Codex sessions: an event stream of items (agentMessage, commandExecution, ...).
+  const event = content.rawPayload?.event
+  if (event) {
+    const item = event.item ?? {}
+    if (typeof item.text === "string" && item.text) parts.push(item.text)
+    if (typeof item.command === "string" && item.command) parts.push(`[${item.command}]`)
+    for (const inner of item.content ?? []) {
+      if (inner.type === "text" && inner.text) parts.push(inner.text)
+    }
+    if (!parts.length && typeof event.type === "string") {
+      parts.push(item.type ? `${event.type}:${item.type}` : event.type)
+    }
   }
   return parts.join(" ") || (typeof content.type === "string" ? content.type : "")
 }

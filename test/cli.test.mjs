@@ -192,10 +192,53 @@ test("messages list digests live content shapes and paginates with --all", async
       },
     },
   }
+  const codexAgentMessage = {
+    id: "m3",
+    sessionId: "s1",
+    sessionIndex: 2,
+    type: "agent",
+    receivedAt: "2026-07-31T10:02:00Z",
+    content: {
+      type: "agent",
+      rawPayload: {
+        event: {
+          type: "item.completed",
+          item: { type: "agentMessage", id: "msg_1", text: "Parser fixed; tests green." },
+        },
+      },
+    },
+  }
+  const codexCommand = {
+    id: "m4",
+    sessionId: "s1",
+    sessionIndex: 3,
+    type: "agent",
+    receivedAt: "2026-07-31T10:03:00Z",
+    content: {
+      type: "agent",
+      rawPayload: {
+        event: {
+          type: "item.completed",
+          item: { type: "commandExecution", id: "exec-1", command: "npm test" },
+        },
+      },
+    },
+  }
+  const codexLifecycle = {
+    id: "m5",
+    sessionId: "s1",
+    sessionIndex: 4,
+    type: "agent",
+    receivedAt: "2026-07-31T10:04:00Z",
+    content: {
+      type: "agent",
+      rawPayload: { event: { type: "thread.started", thread_id: "t1" } },
+    },
+  }
   const { code, calls, out } = await runCli(["messages", "list", "s1", "--all"], {
     responses: [
       { payload: { data: [userMessage], offset: 0, hasMore: true } },
-      { payload: { data: [assistantEvent], offset: 1, hasMore: false } },
+      { payload: { data: [assistantEvent, codexAgentMessage, codexCommand, codexLifecycle], offset: 1, hasMore: false } },
     ],
   })
   assert.equal(code, 0)
@@ -203,6 +246,9 @@ test("messages list digests live content shapes and paginates with --all", async
   assert.equal(calls[1].url, "https://api.conductor.build/v0/sessions/s1/messages?limit=100&offset=1")
   assert.match(out, /Please fix the bug in the parser/)
   assert.match(out, /Looking at the parser now\. \[Bash\]/)
+  assert.match(out, /Parser fixed; tests green\./)
+  assert.match(out, /\[npm test\]/)
+  assert.match(out, /thread\.started/)
   assert.match(out, /hasMore: false/)
 })
 
