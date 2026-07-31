@@ -34,7 +34,7 @@ Commands
   sessions status <sessionId>              Session status (idle | working | error)
   sessions cancel <sessionId>              Cancel a running session
   sessions wait <sessionId>                Poll until the session leaves "working"
-    [--timeout <seconds>] [--interval <seconds>]   defaults: 5400, 10
+    [--timeout <seconds>] [--interval <seconds>]   defaults: 480, 10
   sessions transcript <sessionId>          Print the session transcript (markdown)
   messages list <sessionId>                List session messages as digest rows
     [--limit <n>] [--offset <n>] [--after <messageId>] [--all]
@@ -293,7 +293,9 @@ async function sessionsCommand(request, verb, args, values, context) {
 
 async function waitCommand(request, args, values, { sleep, stderr }) {
   const sessionId = requireId(args[0], "sessionId")
-  const timeoutSeconds = numberFlag(values.timeout, 5400)
+  // Default under typical agent-harness command limits (~10 min), so a wait
+  // times out as a readable CLI error the caller can rerun, not a harness kill.
+  const timeoutSeconds = numberFlag(values.timeout, 480)
   const intervalSeconds = numberFlag(values.interval, 10)
   const deadline = Date.now() + timeoutSeconds * 1000
   let lastStatus

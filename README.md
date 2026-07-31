@@ -58,7 +58,7 @@ conductor-cli sessions transcript <sessionId>
 | `sessions list <workspaceId>` | List a workspace's sessions |
 | `sessions create --workspace <id> --agent <agent> [--name] [--model] [--effort] [--fast]` | Start a new session |
 | `sessions get\|rename\|archive\|status\|cancel <id>` | Inspect and manage one session |
-| `sessions wait <id> [--timeout <s>] [--interval <s>]` | Poll until the session leaves `working` (defaults 5400s / 10s) |
+| `sessions wait <id> [--timeout <s>] [--interval <s>]` | Poll until the session leaves `working` (defaults 480s / 10s — sized to fit agent-harness command timeouts; rerun to keep waiting) |
 | `sessions transcript <id>` | Print the session's concise transcript as markdown |
 | `messages list <sessionId> [--limit] [--offset] [--after] [--all]` | List messages as digest rows; `--json` for full content |
 | `messages send <sessionId> [text] [--file <path>] [--id <messageId>]` | Queue a user message (stdin when text and `--file` are absent) |
@@ -91,7 +91,7 @@ The pattern this CLI is built around: an orchestrating agent creates or reuses a
 ```bash
 SESSION=$(conductor-cli sessions create --workspace "$WORKSPACE" --agent cursor --model grok-4.5 --json | jq -r .id)
 conductor-cli messages send "$SESSION" --file brief.md
-conductor-cli sessions wait "$SESSION" --timeout 5400
+until conductor-cli sessions wait "$SESSION"; do :; done
 conductor-cli sessions transcript "$SESSION" > worker-transcript.md
 ```
 
