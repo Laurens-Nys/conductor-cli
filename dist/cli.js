@@ -11,7 +11,8 @@ var package_default = {
   license: "MIT",
   repository: "github:Laurens-Nys/conductor-cli",
   bin: {
-    "conductor-cli": "bin/conductor-cli.mjs"
+    "conductor-cli": "bin/conductor-cli.mjs",
+    duct: "bin/conductor-cli.mjs"
   },
   files: [
     "bin",

@@ -6,7 +6,7 @@ An unofficial command-line client for the [Conductor](https://conductor.build) b
 
 This is a personal tool, not affiliated with or endorsed by Conductor. It is built against Conductor's beta OpenAPI document (`Roundhouse public API`, document version `0.0.1`, fetched from `https://api.conductor.build/v0/openapi.json` on 2026-07-31). The API is in beta: endpoints, fields, and the agent/model/effort vocabularies can change or disappear without notice, and this CLI will lag behind when they do. The `api` escape-hatch command exists precisely so new endpoints stay reachable before the CLI catches up.
 
-Conductor's macOS app bundles its own official `conductor` CLI (on PATH inside local workspaces). This tool intentionally uses the binary name `conductor-cli` so it never shadows that. Reach for this one where the app is not installed: CI, Linux hosts, cloud sandboxes, or servers orchestrating Conductor over the API.
+Conductor's macOS app bundles its own official `conductor` CLI (on PATH inside local workspaces). This tool intentionally uses the binary name `conductor-cli` so it never shadows that. Installing also adds `duct` (con-**duct**-or) as a short alias for the same binary — documentation sticks to the full name. Reach for this one where the app is not installed: CI, Linux hosts, cloud sandboxes, or servers orchestrating Conductor over the API.
 
 ## Install
 
