@@ -20,7 +20,7 @@ Or run without installing:
 npx --yes github:Laurens-Nys/conductor-cli --help
 ```
 
-Requires Node 22 or newer.
+Requires Node 22 or newer (or Bun) at runtime.
 
 ## Authentication
 
@@ -41,8 +41,8 @@ conductor-cli workspaces list <projectId>
 
 # Create a workspace with a first session and send it work
 conductor-cli workspaces create --project <projectId> --name fix-parser --agent claude --model fable-5
-conductor-cli messages send <sessionId> "Fix the parser bug in src/parse.mjs"
-conductor-cli sessions wait <sessionId> --timeout 3600
+conductor-cli messages send <sessionId> "Fix the parser bug in src/parse.mjs" --id <myMessageId>
+conductor-cli sessions wait <sessionId> --for-message <myMessageId> --timeout 3600
 conductor-cli sessions transcript <sessionId>
 ```
 
@@ -56,9 +56,9 @@ conductor-cli sessions transcript <sessionId>
 | `workspaces create --project <id>\|--repo <url> [--branch] [--name] [--session-name] [--agent] [--model] [--effort] [--env K=V]...` | Create a workspace and its first session |
 | `workspaces get\|rename\|archive\|status <id>` | Inspect and manage one workspace |
 | `sessions list <workspaceId>` | List a workspace's sessions |
-| `sessions create --workspace <id> --agent <agent> [--name] [--model] [--effort] [--fast]` | Start a new session |
+| `sessions create --workspace <id> --agent <agent> [--name] [--model] [--effort] [--fast] [--session-id <id>]` | Start a new session |
 | `sessions get\|rename\|archive\|status\|cancel <id>` | Inspect and manage one session |
-| `sessions wait <id> [--timeout <s>] [--interval <s>]` | Poll until the session leaves `working` (defaults 480s / 10s — sized to fit agent-harness command timeouts; rerun to keep waiting) |
+| `sessions wait <id> [--timeout <s>] [--interval <s>] [--for-message <messageId>]` | Poll until the session leaves `working`; `--for-message` also requires agent activity after that message (defaults 480s / 10s — sized to fit agent-harness command timeouts; rerun to keep waiting) |
 | `sessions transcript <id>` | Print the session's concise transcript as markdown |
 | `messages list <sessionId> [--limit] [--offset] [--after] [--all]` | List messages as digest rows; `--json` for full content |
 | `messages send <sessionId> [text] [--file <path>] [--id <messageId>]` | Queue a user message (stdin when text and `--file` are absent) |
@@ -67,6 +67,8 @@ conductor-cli sessions transcript <sessionId>
 | `api <METHOD> <path> [--body <json>]` | Raw request against any endpoint, e.g. `api GET /v0/projects` |
 
 Agent values as of the pinned API document: `claude`, `codex`, `cursor`, `acp`. Effort: `none`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`. Models are a moving list (`fable-5`, `opus`, `sonnet`, `gpt-5.6-sol`, `grok-4.5`, ...) — trust the API's validation error over any list written down here.
+
+Workspace and session create, get, rename, and list commands also accept `--channel <name>`: the desktop-app channel that `deepLink` fields in responses should open (defaults to the deployment's primary channel).
 
 ## Output
 
@@ -90,12 +92,12 @@ The pattern this CLI is built around: an orchestrating agent creates or reuses a
 
 ```bash
 SESSION=$(conductor-cli sessions create --workspace "$WORKSPACE" --agent cursor --model grok-4.5 --json | jq -r .id)
-conductor-cli messages send "$SESSION" --file brief.md
-until conductor-cli sessions wait "$SESSION"; do :; done
+MESSAGE=$(conductor-cli messages send "$SESSION" --file brief.md --json | jq -r .messageId)
+until conductor-cli sessions wait "$SESSION" --for-message "$MESSAGE"; do :; done
 conductor-cli sessions transcript "$SESSION" > worker-transcript.md
 ```
 
-`messages send` queues; the returned `state` is `queued` or `sent`. `sessions wait` exits non-zero on timeout, and prints the final status (`idle` or `error`) on success.
+`messages send` queues; the returned `state` is `queued` or `sent`. A plain `wait` issued immediately after a send can observe `idle` before the worker ever starts — `--for-message` closes that race by also requiring at least one transcript message after yours. `sessions wait` exits non-zero on timeout, and prints the final status (`idle` or `error`) on success.
 
 ## The transcript view
 
@@ -115,12 +117,15 @@ npx --yes skills add https://github.com/Laurens-Nys/conductor-cli --skill conduc
 
 ## Development
 
+TypeScript source (`src/cli.ts`), built with [Bun](https://bun.sh) into a committed `dist/` bundle that runs on stock Node — `npx`/`npm` consumers never need Bun.
+
 ```bash
-npm install
-npm test
+bun install
+bun run test        # rebuilds dist/, then runs the suite (includes a dist-under-node smoke test)
+bun run typecheck   # tsc --noEmit
 ```
 
-Plain Node, one dependency (`@toon-format/toon`), no build step.
+After changing `src/`, rerun `bun run test` and commit the regenerated `dist/cli.js`. One runtime dependency (`@toon-format/toon`).
 
 ## License
 

@@ -1,24 +1,42 @@
 import assert from "node:assert/strict"
+import { spawnSync } from "node:child_process"
 import { mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { test } from "node:test"
 
-import { run } from "../src/cli.mjs"
+import { test } from "bun:test"
+
+import packageJson from "../package.json" with { type: "json" }
+import { run, type RunOverrides } from "../src/cli.ts"
 
 const ENV = { CONDUCTOR_API_KEY: "test-key" }
 
-function createFetch(...responses) {
-  const calls = []
+interface FakeResponse {
+  status?: number
+  payload?: unknown
+  raw?: string
+  throws?: Error
+}
+
+interface RecordedCall {
+  url: string
+  method: string
+  headers: Record<string, string>
+  body?: any
+}
+
+function createFetch(...responses: FakeResponse[]) {
+  const calls: RecordedCall[] = []
   const queue = [...responses]
-  const fetchImpl = async (url, options = {}) => {
+  const fetchImpl = async (url: string, options: { method: string; headers: Record<string, string>; body?: string }) => {
+    const next = queue.shift() ?? { payload: {} }
+    if (next.throws) throw next.throws
     calls.push({
       url,
       method: options.method || "GET",
       headers: options.headers,
       body: options.body === undefined ? undefined : JSON.parse(options.body),
     })
-    const next = queue.shift() ?? { payload: {} }
     return {
       ok: (next.status ?? 200) < 400,
       status: next.status ?? 200,
@@ -32,14 +50,21 @@ function createIo() {
   let out = ""
   let err = ""
   return {
-    stdout: { write: (text) => { out += text } },
-    stderr: { write: (text) => { err += text } },
+    stdout: { write: (text: string) => { out += text } },
+    stderr: { write: (text: string) => { err += text } },
     out: () => out,
     err: () => err,
   }
 }
 
-async function runCli(argv, { responses = [{ payload: {} }], env = ENV, readStdin, sleep } = {}) {
+interface RunCliOptions {
+  responses?: FakeResponse[]
+  env?: Record<string, string | undefined>
+  readStdin?: RunOverrides["readStdin"]
+  sleep?: RunOverrides["sleep"]
+}
+
+async function runCli(argv: string[], { responses = [{ payload: {} }], env = ENV, readStdin, sleep }: RunCliOptions = {}) {
   const { fetchImpl, calls } = createFetch(...responses)
   const io = createIo()
   const code = await run(argv, {
@@ -67,8 +92,8 @@ test("projects list renders TOON tabular rows", async () => {
     }],
   })
   assert.equal(code, 0)
-  assert.equal(calls[0].url, "https://api.conductor.build/v0/projects")
-  assert.equal(calls[0].headers.authorization, "Bearer test-key")
+  assert.equal(calls[0]!.url, "https://api.conductor.build/v0/projects")
+  assert.equal(calls[0]!.headers.authorization, "Bearer test-key")
   assert.match(out, /data\[2\]\{id,name,gitRemote\}/)
   assert.match(out, /hasMore: false/)
 })
@@ -83,7 +108,7 @@ test("--json prints the raw payload", async () => {
 
 test("list pagination flags become query parameters", async () => {
   const { calls } = await runCli(["workspaces", "list", "p1", "--limit", "5", "--offset", "10"])
-  assert.equal(calls[0].url, "https://api.conductor.build/v0/projects/p1/workspaces?limit=5&offset=10")
+  assert.equal(calls[0]!.url, "https://api.conductor.build/v0/projects/p1/workspaces?limit=5&offset=10")
 })
 
 test("workspaces create maps flags to the request body", async () => {
@@ -100,9 +125,9 @@ test("workspaces create maps flags to the request body", async () => {
     "--env", "BAZ=qux=1",
   ])
   assert.equal(code, 0)
-  assert.equal(calls[0].method, "POST")
-  assert.equal(calls[0].url, "https://api.conductor.build/v0/workspaces")
-  assert.deepEqual(calls[0].body, {
+  assert.equal(calls[0]!.method, "POST")
+  assert.equal(calls[0]!.url, "https://api.conductor.build/v0/workspaces")
+  assert.deepEqual(calls[0]!.body, {
     repositoryUrl: "https://github.com/Laurens-Nys/conductor-cli",
     branch: "main",
     name: "smoke",
@@ -133,7 +158,7 @@ test("sessions create requires --workspace and --agent, maps --fast", async () =
   const { calls } = await runCli([
     "sessions", "create", "--workspace", "w1", "--agent", "codex", "--model", "gpt-5.6-sol", "--fast",
   ])
-  assert.deepEqual(calls[0].body, {
+  assert.deepEqual(calls[0]!.body, {
     workspaceId: "w1",
     agent: "codex",
     model: "gpt-5.6-sol",
@@ -145,8 +170,8 @@ test("messages send posts inline text and optional message id", async () => {
   const { calls } = await runCli(["messages", "send", "s1", "do", "the", "thing", "--id", "m-42"], {
     responses: [{ status: 201, payload: { messageId: "m-42", state: "queued" } }],
   })
-  assert.equal(calls[0].url, "https://api.conductor.build/v0/sessions/s1/messages")
-  assert.deepEqual(calls[0].body, { message: "do the thing", messageId: "m-42" })
+  assert.equal(calls[0]!.url, "https://api.conductor.build/v0/sessions/s1/messages")
+  assert.deepEqual(calls[0]!.body, { message: "do the thing", messageId: "m-42" })
 })
 
 test("messages send reads --file and stdin fallbacks", async () => {
@@ -154,10 +179,10 @@ test("messages send reads --file and stdin fallbacks", async () => {
   const briefPath = join(directory, "brief.md")
   await writeFile(briefPath, "# Brief\nwork\n")
   const fromFile = await runCli(["messages", "send", "s1", "--file", briefPath])
-  assert.deepEqual(fromFile.calls[0].body, { message: "# Brief\nwork\n" })
+  assert.deepEqual(fromFile.calls[0]!.body, { message: "# Brief\nwork\n" })
 
   const fromStdin = await runCli(["messages", "send", "s1"], { readStdin: async () => "piped brief" })
-  assert.deepEqual(fromStdin.calls[0].body, { message: "piped brief" })
+  assert.deepEqual(fromStdin.calls[0]!.body, { message: "piped brief" })
 
   const empty = await runCli(["messages", "send", "s1"])
   assert.equal(empty.code, 1)
@@ -235,21 +260,73 @@ test("messages list digests live content shapes and paginates with --all", async
       rawPayload: { event: { type: "thread.started", thread_id: "t1" } },
     },
   }
+  const claudeLifecycle = {
+    id: "m6",
+    sessionId: "s1",
+    sessionIndex: 5,
+    type: "agent",
+    receivedAt: "2026-07-31T10:05:00Z",
+    content: {
+      type: "agent",
+      rawPayload: { type: "system", subtype: "session_state_changed", state: "running" },
+    },
+  }
   const { code, calls, out } = await runCli(["messages", "list", "s1", "--all"], {
     responses: [
       { payload: { data: [userMessage], offset: 0, hasMore: true } },
-      { payload: { data: [assistantEvent, codexAgentMessage, codexCommand, codexLifecycle], offset: 1, hasMore: false } },
+      { payload: { data: [assistantEvent, codexAgentMessage, codexCommand, codexLifecycle, claudeLifecycle], offset: 1, hasMore: false } },
     ],
   })
   assert.equal(code, 0)
   assert.equal(calls.length, 2)
-  assert.equal(calls[1].url, "https://api.conductor.build/v0/sessions/s1/messages?limit=100&offset=1")
+  assert.equal(calls[1]!.url, "https://api.conductor.build/v0/sessions/s1/messages?limit=100&after=m1")
   assert.match(out, /Please fix the bug in the parser/)
   assert.match(out, /Looking at the parser now\. \[Bash\]/)
   assert.match(out, /Parser fixed; tests green\./)
   assert.match(out, /\[npm test\]/)
   assert.match(out, /thread\.started/)
+  assert.match(out, /system:session_state_changed/)
   assert.match(out, /hasMore: false/)
+})
+
+test("messages list --all --after keeps paging by cursor, never offsets", async () => {
+  const row = (id: string, index: number) => ({
+    id,
+    sessionId: "s1",
+    sessionIndex: index,
+    type: "agent",
+    receivedAt: "t",
+    content: { type: "agent", message: `event ${index}` },
+  })
+  const { code, calls, out } = await runCli(["messages", "list", "s1", "--all", "--after", "m0", "--json"], {
+    responses: [
+      { payload: { data: [row("a", 2), row("b", 3)], offset: 0, hasMore: true } },
+      { payload: { data: [row("c", 4)], offset: 0, hasMore: false } },
+    ],
+  })
+  assert.equal(code, 0)
+  assert.equal(calls[0]!.url, "https://api.conductor.build/v0/sessions/s1/messages?after=m0")
+  assert.equal(calls[1]!.url, "https://api.conductor.build/v0/sessions/s1/messages?limit=100&after=b")
+  assert.deepEqual(JSON.parse(out).data.map((m: { sessionIndex: number }) => m.sessionIndex), [2, 3, 4])
+})
+
+test("messages list --all stops on an empty page instead of looping", async () => {
+  const message = {
+    id: "m1",
+    sessionId: "s1",
+    sessionIndex: 0,
+    type: "userMessage",
+    receivedAt: "t",
+    content: { type: "userMessage", message: "hi" },
+  }
+  const { code, calls } = await runCli(["messages", "list", "s1", "--all"], {
+    responses: [
+      { payload: { data: [message], offset: 0, hasMore: true } },
+      { payload: { data: [], offset: 0, hasMore: true } },
+    ],
+  })
+  assert.equal(code, 0)
+  assert.equal(calls.length, 2)
 })
 
 test("sessions wait polls until the session leaves working", async () => {
@@ -275,21 +352,79 @@ test("sessions wait times out with an error", async () => {
   assert.match(err, /Timed out/)
 })
 
+test("sessions wait caps the sleep to the remaining timeout", async () => {
+  const working = { payload: { sessionId: "s1", status: "working", updatedAt: "t" } }
+  const idle = { payload: { sessionId: "s1", status: "idle", updatedAt: "t" } }
+  const sleeps: number[] = []
+  const { code } = await runCli(["sessions", "wait", "s1", "--timeout", "5", "--interval", "10"], {
+    responses: [working, idle],
+    sleep: async (ms) => { sleeps.push(ms) },
+  })
+  assert.equal(code, 0)
+  assert.equal(sleeps.length, 1)
+  assert.ok(sleeps[0]! <= 5000, `sleep should be capped to the 5s deadline, got ${sleeps[0]}ms`)
+})
+
+test("sessions wait --for-message requires agent activity after the message", async () => {
+  const idle = { payload: { sessionId: "s1", status: "idle", updatedAt: "t" } }
+  const anchorMissing = { status: 404, payload: { userMessage: "Cursor message not found in this session" } }
+  const noActivity = { payload: { data: [], offset: 0, hasMore: false } }
+  const activity = {
+    payload: {
+      data: [{ id: "m9", sessionId: "s1", sessionIndex: 9, type: "agent", receivedAt: "t", content: {} }],
+      offset: 0,
+      hasMore: true,
+    },
+  }
+  const { code, calls, out, err } = await runCli(["sessions", "wait", "s1", "--for-message", "brief-1"], {
+    responses: [idle, anchorMissing, idle, noActivity, idle, activity],
+  })
+  assert.equal(code, 0)
+  assert.equal(calls.length, 6)
+  assert.equal(calls[1]!.url, "https://api.conductor.build/v0/sessions/s1/messages?after=brief-1&limit=1")
+  assert.match(err, /idle \(no agent activity after the message yet\)/)
+  assert.match(out, /status: idle/)
+})
+
+test("network failures surface as clean CLI errors", async () => {
+  const { code, err } = await runCli(["me"], {
+    responses: [{ throws: new TypeError("fetch failed", { cause: new Error("connect ECONNREFUSED 127.0.0.1:9") }) }],
+  })
+  assert.equal(code, 1)
+  assert.match(err, /conductor-cli: GET https:\/\/api\.conductor\.build\/me failed: connect ECONNREFUSED/)
+})
+
+test("sessions create forwards --session-id and --channel", async () => {
+  const { calls } = await runCli([
+    "sessions", "create", "--workspace", "w1", "--agent", "claude", "--session-id", "sess-42", "--channel", "beta",
+  ])
+  assert.equal(calls[0]!.url, "https://api.conductor.build/v0/sessions?channel=beta")
+  assert.deepEqual(calls[0]!.body, { workspaceId: "w1", agent: "claude", sessionId: "sess-42" })
+})
+
+test("--channel becomes a query parameter on lists and gets", async () => {
+  const list = await runCli(["workspaces", "list", "p1", "--channel", "beta"])
+  assert.equal(list.calls[0]!.url, "https://api.conductor.build/v0/projects/p1/workspaces?channel=beta")
+
+  const get = await runCli(["sessions", "get", "s1", "--channel", "beta"])
+  assert.equal(get.calls[0]!.url, "https://api.conductor.build/v0/sessions/s1?channel=beta")
+})
+
 test("sessions transcript prints raw markdown from the sql endpoint", async () => {
   const { code, calls, out } = await runCli(["sessions", "transcript", "it's-a-session"], {
     responses: [{ payload: { rows: [{ transcript: "# Transcript\n\nhello" }], rowCount: 1, truncated: false } }],
   })
   assert.equal(code, 0)
-  assert.equal(calls[0].url, "https://api.conductor.build/v0/sql")
-  assert.match(calls[0].body.query, /WHERE session_id = 'it''s-a-session'/)
+  assert.equal(calls[0]!.url, "https://api.conductor.build/v0/sql")
+  assert.match(calls[0]!.body.query, /WHERE session_id = 'it''s-a-session'/)
   assert.equal(out, "# Transcript\n\nhello\n")
 })
 
 test("api escape hatch sends a parsed body and rejects invalid JSON", async () => {
   const { calls } = await runCli(["api", "post", "/v0/sql", "--body", '{"query":"SELECT 1"}'])
-  assert.equal(calls[0].method, "POST")
-  assert.equal(calls[0].url, "https://api.conductor.build/v0/sql")
-  assert.deepEqual(calls[0].body, { query: "SELECT 1" })
+  assert.equal(calls[0]!.method, "POST")
+  assert.equal(calls[0]!.url, "https://api.conductor.build/v0/sql")
+  assert.deepEqual(calls[0]!.body, { query: "SELECT 1" })
 
   const invalid = await runCli(["api", "GET", "/v0/projects", "--body", "not json"])
   assert.equal(invalid.code, 1)
@@ -298,7 +433,7 @@ test("api escape hatch sends a parsed body and rejects invalid JSON", async () =
 
 test("identifiers are URL-encoded in paths", async () => {
   const { calls } = await runCli(["sessions", "status", "a/b c"])
-  assert.equal(calls[0].url, "https://api.conductor.build/v0/sessions/a%2Fb%20c/status")
+  assert.equal(calls[0]!.url, "https://api.conductor.build/v0/sessions/a%2Fb%20c/status")
 })
 
 test("missing CONDUCTOR_API_KEY fails with guidance", async () => {
@@ -320,15 +455,15 @@ test("CONDUCTOR_SESSION_ID is forwarded as a header when present", async () => {
   const { calls } = await runCli(["me"], {
     env: { ...ENV, CONDUCTOR_SESSION_ID: "sess-1" },
   })
-  assert.equal(calls[0].headers["x-conductor-session-id"], "sess-1")
+  assert.equal(calls[0]!.headers["x-conductor-session-id"], "sess-1")
 })
 
 test("CONDUCTOR_API_URL and --api-url override the base", async () => {
   const fromEnv = await runCli(["me"], { env: { ...ENV, CONDUCTOR_API_URL: "https://example.test/" } })
-  assert.equal(fromEnv.calls[0].url, "https://example.test/me")
+  assert.equal(fromEnv.calls[0]!.url, "https://example.test/me")
 
   const fromFlag = await runCli(["me", "--api-url", "http://localhost:3000"])
-  assert.equal(fromFlag.calls[0].url, "http://localhost:3000/me")
+  assert.equal(fromFlag.calls[0]!.url, "http://localhost:3000/me")
 })
 
 test("unknown commands and bare invocation fail with usage guidance", async () => {
@@ -343,4 +478,12 @@ test("unknown commands and bare invocation fail with usage guidance", async () =
   const help = await runCli(["--help"])
   assert.equal(help.code, 0)
   assert.match(help.out, /sessions wait/)
+})
+
+// The published artifact must run on stock Node (npx consumers never have
+// Bun); this exercises bin -> dist end to end and catches a stale dist version.
+test("built dist runs under plain node", () => {
+  const result = spawnSync("node", ["bin/conductor-cli.mjs", "--version"], { encoding: "utf8" })
+  assert.equal(result.status, 0)
+  assert.equal(result.stdout.trim(), packageJson.version)
 })
