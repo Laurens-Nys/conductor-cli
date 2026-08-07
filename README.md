@@ -11,8 +11,10 @@ Conductor's macOS app bundles its own official `conductor` CLI (on PATH inside l
 ## Install
 
 ```bash
-npm install -g github:Laurens-Nys/conductor-cli
+npm install -g https://github.com/Laurens-Nys/conductor-cli/archive/refs/heads/main.tar.gz
 ```
+
+Install from the branch tarball, not `npm install -g github:Laurens-Nys/conductor-cli`: some npm versions (seen on 10.9.8) resolve the git spec, report `added 2 packages`, and then install an empty package directory with a dangling `conductor-cli` symlink. The tarball URL takes the same code from the same branch and installs it reliably. `npx github:...` is unaffected.
 
 Or run without installing:
 
