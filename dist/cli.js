@@ -5,7 +5,7 @@ import { encode } from "@toon-format/toon";
 // package.json
 var package_default = {
   name: "conductor-cli",
-  version: "0.2.0",
+  version: "0.2.1",
   description: "Unofficial command-line client for the Conductor beta API, with TOON output for coding agents",
   type: "module",
   license: "MIT",
