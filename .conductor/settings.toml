@@ -1,0 +1,22 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+# Cloud workspaces (and the snapshots built from them) ship with whatever
+# conductor-cli was installed when the image was built, which goes stale as soon
+# as this repo moves. Build the checkout and install it over that copy so a
+# workspace always runs the CLI from its own branch, not a baked-in release.
+#
+# --prefix "$HOME/.local" matches where the sandbox image installs the CLI and is
+# the copy that is on PATH; npm's configured prefix is elsewhere and unused.
+#
+# Local (Mac) workspaces are skipped on purpose: a worktree holding an in-progress
+# branch must not clobber the user's real global install.
+[scripts]
+setup = """
+set -e
+bun install
+bun run build
+if [ "$CONDUCTOR_IS_LOCAL" = "0" ]; then
+  npm install -g --prefix "$HOME/.local" "$CONDUCTOR_WORKSPACE_PATH"
+  conductor-cli --version
+fi
+"""

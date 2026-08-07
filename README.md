@@ -97,7 +97,7 @@ until conductor-cli sessions wait "$SESSION" --for-message "$MESSAGE"; do :; don
 conductor-cli sessions transcript "$SESSION" > worker-transcript.md
 ```
 
-`messages send` queues; the returned `state` is `queued` or `sent`. A plain `wait` issued immediately after a send can observe `idle` before the worker ever starts — `--for-message` closes that race by also requiring at least one transcript message after yours. `sessions wait` exits non-zero on timeout, and prints the final status (`idle` or `error`) on success.
+`messages send` queues; the returned `state` is `queued` or `sent`. A plain `wait` issued immediately after a send can observe `idle` before the worker ever starts — `--for-message` closes that race by also requiring an agent event tagged with your message id. (The returned `messageId` identifies the turn, not the transcript row it lands in, so it is not a valid `--after` anchor for `messages list`; agent events echo it back as `content.userMessageId`/`content.turnId`.) `sessions wait` exits non-zero on timeout, and prints the final status (`idle` or `error`) on success.
 
 ## The transcript view
 

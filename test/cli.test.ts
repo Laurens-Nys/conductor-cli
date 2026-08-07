@@ -166,6 +166,16 @@ test("sessions create requires --workspace and --agent, maps --fast", async () =
   })
 })
 
+// fastMode is opt-in only: without --fast the field must be absent so the
+// session runs in whatever mode Conductor defaults that model to (standard).
+test("sessions create omits fastMode unless --fast is supplied", async () => {
+  const { calls } = await runCli([
+    "sessions", "create", "--workspace", "w1", "--agent", "cursor", "--model", "grok-4.5",
+  ])
+  assert.deepEqual(calls[0]!.body, { workspaceId: "w1", agent: "cursor", model: "grok-4.5" })
+  assert.ok(!("fastMode" in calls[0]!.body))
+})
+
 test("messages send posts inline text and optional message id", async () => {
   const { calls } = await runCli(["messages", "send", "s1", "do", "the", "thing", "--id", "m-42"], {
     responses: [{ status: 201, payload: { messageId: "m-42", state: "queued" } }],
@@ -365,25 +375,76 @@ test("sessions wait caps the sleep to the remaining timeout", async () => {
   assert.ok(sleeps[0]! <= 5000, `sleep should be capped to the 5s deadline, got ${sleeps[0]}ms`)
 })
 
-test("sessions wait --for-message requires agent activity after the message", async () => {
+// The receipt id from `messages send` is the turn id, never the transcript row
+// id, so every id below is deliberately distinct: matching on the row anchor
+// instead of content.userMessageId is the regression this guards.
+const RECEIPT = "turn-abc"
+
+function userRow(id: string, index: number) {
+  return { id, sessionId: "s1", sessionIndex: index, type: "userMessage", receivedAt: "t", content: { id: RECEIPT, turnId: RECEIPT, message: "brief" } }
+}
+
+function agentRow(id: string, index: number, content: unknown) {
+  return { id, sessionId: "s1", sessionIndex: index, type: "agent", receivedAt: "t", content }
+}
+
+test("sessions wait --for-message waits for an agent event tagged with the sent message", async () => {
   const idle = { payload: { sessionId: "s1", status: "idle", updatedAt: "t" } }
-  const anchorMissing = { status: 404, payload: { userMessage: "Cursor message not found in this session" } }
-  const noActivity = { payload: { data: [], offset: 0, hasMore: false } }
+  // Poll 1: the message is queued, so it is not in the transcript at all yet.
+  const beforeSend = { payload: { data: [agentRow("row-1", 1, { turnId: "turn-earlier" })], offset: 0, hasMore: false } }
+  // Poll 2: the user row landed, but no agent event for it — its matching
+  // turnId must not be mistaken for the worker having started.
+  const queued = { payload: { data: [userRow("row-2", 2)], offset: 0, hasMore: false } }
+  // Poll 3: an event from the turn, with a row id unrelated to the receipt.
   const activity = {
     payload: {
-      data: [{ id: "m9", sessionId: "s1", sessionIndex: 9, type: "agent", receivedAt: "t", content: {} }],
+      data: [agentRow("row-3", 3, { rawPayload: { type: "system" }, userMessageId: RECEIPT, turnId: RECEIPT })],
       offset: 0,
-      hasMore: true,
+      hasMore: false,
     },
   }
-  const { code, calls, out, err } = await runCli(["sessions", "wait", "s1", "--for-message", "brief-1"], {
-    responses: [idle, anchorMissing, idle, noActivity, idle, activity],
+  const { code, calls, out, err } = await runCli(["sessions", "wait", "s1", "--for-message", RECEIPT], {
+    responses: [idle, beforeSend, idle, queued, idle, activity],
   })
   assert.equal(code, 0)
   assert.equal(calls.length, 6)
-  assert.equal(calls[1]!.url, "https://api.conductor.build/v0/sessions/s1/messages?after=brief-1&limit=1")
-  assert.match(err, /idle \(no agent activity after the message yet\)/)
+  // The scan pages the transcript and resumes from the last row it read.
+  assert.equal(calls[1]!.url, "https://api.conductor.build/v0/sessions/s1/messages?limit=100")
+  assert.equal(calls[3]!.url, "https://api.conductor.build/v0/sessions/s1/messages?limit=100&after=row-1")
+  assert.equal(calls[5]!.url, "https://api.conductor.build/v0/sessions/s1/messages?limit=100&after=row-2")
+  assert.match(err, /idle \(no agent activity for the message yet\)/)
   assert.match(out, /status: idle/)
+})
+
+test("sessions wait --for-message pages a single poll until the tagged event is found", async () => {
+  const idle = { payload: { sessionId: "s1", status: "idle", updatedAt: "t" } }
+  const firstPage = { payload: { data: [userRow("row-1", 1)], offset: 0, hasMore: true } }
+  const secondPage = {
+    payload: { data: [agentRow("row-2", 2, { turnId: RECEIPT })], offset: 1, hasMore: true },
+  }
+  const { code, calls } = await runCli(["sessions", "wait", "s1", "--for-message", RECEIPT], {
+    responses: [idle, firstPage, secondPage],
+  })
+  assert.equal(code, 0)
+  assert.equal(calls.length, 3)
+  assert.equal(calls[2]!.url, "https://api.conductor.build/v0/sessions/s1/messages?limit=100&after=row-1")
+})
+
+test("sessions wait --for-message times out when only other turns are active", async () => {
+  const idle = { payload: { sessionId: "s1", status: "idle", updatedAt: "t" } }
+  const otherTurn = {
+    payload: {
+      data: [agentRow("row-1", 1, { userMessageId: "turn-other", turnId: "turn-other" })],
+      offset: 0,
+      hasMore: false,
+    },
+  }
+  const { code, err } = await runCli(["sessions", "wait", "s1", "--for-message", RECEIPT, "--timeout", "0.001"], {
+    responses: [idle, otherTurn, idle, { payload: { data: [], offset: 0, hasMore: false } }],
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(ms, 5))),
+  })
+  assert.equal(code, 1)
+  assert.match(err, /Timed out after 0\.001s waiting for agent activity for message turn-abc/)
 })
 
 test("network failures surface as clean CLI errors", async () => {
