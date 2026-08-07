@@ -35,7 +35,7 @@ Commands
   sessions cancel <sessionId>              Cancel a running session
   sessions wait <sessionId>                Poll until the session leaves "working"
     [--timeout <seconds>] [--interval <seconds>]   defaults: 480, 10
-    [--for-message <id>]                   also require agent activity after that message
+    [--for-message <id>]                   also require an agent event for that message
   sessions transcript <sessionId>          Print the session transcript (markdown)
   messages list <sessionId>                List session messages as digest rows
     [--limit <n>] [--offset <n>] [--after <messageId>] [--all]
@@ -358,15 +358,18 @@ async function waitCommand(request: RequestFn, args: string[], values: Flags, { 
   const timeoutSeconds = numberFlag(values.timeout, 480)
   const intervalSeconds = numberFlag(values.interval, 10)
   const forMessage = values["for-message"]
+  const sawAgentActivity = forMessage === undefined
+    ? undefined
+    : createActivityWatcher(request, sessionId, forMessage)
   const deadline = Date.now() + timeoutSeconds * 1000
   let lastLabel
   for (;;) {
     const status = await request("GET", `/v0/sessions/${sessionId}/status`)
     let pending = false
-    if (status.status !== "working" && forMessage !== undefined) {
-      pending = !(await hasActivityAfter(request, sessionId, forMessage))
+    if (status.status !== "working" && sawAgentActivity !== undefined) {
+      pending = !(await sawAgentActivity())
     }
-    const label = status.status + (pending ? " (no agent activity after the message yet)" : "")
+    const label = status.status + (pending ? " (no agent activity for the message yet)" : "")
     if (label !== lastLabel) {
       stderr.write(`conductor-cli: session is ${label}\n`)
       lastLabel = label
@@ -377,7 +380,7 @@ async function waitCommand(request: RequestFn, args: string[], values: Flags, { 
     if (Date.now() >= deadline) {
       const goal = forMessage === undefined
         ? 'the session to leave "working"'
-        : `agent activity after message ${forMessage}`
+        : `agent activity for message ${forMessage}`
       throw new CliError(`Timed out after ${timeoutSeconds}s waiting for ${goal}`)
     }
     await sleep(Math.min(intervalSeconds * 1000, deadline - Date.now()))
@@ -385,19 +388,39 @@ async function waitCommand(request: RequestFn, args: string[], values: Flags, { 
 }
 
 // Guards the send→wait race: a wait issued right after a send can observe
-// "idle" before the worker ever starts. A message still queued is not in the
-// transcript yet, so the after-anchor lookup fails — that also means keep waiting.
-async function hasActivityAfter(request: RequestFn, sessionId: string, messageId: string): Promise<boolean> {
-  try {
-    const page = await request(
-      "GET",
-      `/v0/sessions/${sessionId}/messages?after=${encodeURIComponent(messageId)}&limit=1`,
-    )
-    return Array.isArray(page.data) && page.data.length > 0
-  } catch (error) {
-    if (error instanceof CliError) return false
-    throw error
+// "idle" before the worker ever starts.
+//
+// `messages send` returns a receipt id that identifies the turn, not the
+// transcript row it eventually lands in, so it is not a usable `after` anchor —
+// paging with it 404s. Agent events carry the receipt back instead: every event
+// of the turn is tagged with content.userMessageId (and content.turnId), both
+// equal to the receipt across Cursor/Grok, Claude, and Codex sessions. So scan
+// the transcript for an agent event tagged with it.
+//
+// The watcher keeps a cursor between polls: the first scan walks the transcript
+// once, and every later poll resumes after the last row it already read.
+function createActivityWatcher(request: RequestFn, sessionId: string, messageId: string): () => Promise<boolean> {
+  let cursor: string | undefined
+  return async function sawAgentActivity() {
+    for (;;) {
+      const anchor = cursor === undefined ? "" : `&after=${encodeURIComponent(cursor)}`
+      const page = await request("GET", `/v0/sessions/${sessionId}/messages?limit=100${anchor}`)
+      const data: Payload[] = Array.isArray(page.data) ? page.data : []
+      if (!data.length) return false // hasMore with an empty page must not spin forever
+      cursor = data.at(-1)?.id ?? cursor
+      if (data.some((message) => isAgentActivityFor(message, messageId))) return true
+      if (!page.hasMore) return false
+    }
   }
+}
+
+// Only agent rows count: the user's own transcript row carries the same turnId,
+// and matching it would answer "yes" before the worker has done anything.
+function isAgentActivityFor(message: Payload, messageId: string): boolean {
+  if (message?.type !== "agent") return false
+  const content = message.content
+  if (!content || typeof content !== "object") return false
+  return content.userMessageId === messageId || content.turnId === messageId
 }
 
 async function transcriptCommand(request: RequestFn, args: string[]): Promise<string> {
