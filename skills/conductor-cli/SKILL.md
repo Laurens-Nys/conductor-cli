@@ -19,8 +19,10 @@ conductor-cli --version
 If absent, run it without installing by prefixing every command with `npx --yes github:Laurens-Nys/conductor-cli`, or install globally:
 
 ```bash
-npm install -g github:Laurens-Nys/conductor-cli
+npm install -g https://github.com/Laurens-Nys/conductor-cli/archive/refs/heads/main.tar.gz
 ```
+
+Use that tarball URL rather than `npm install -g github:Laurens-Nys/conductor-cli` — on some npm versions the git spec installs an empty package and leaves `conductor-cli` on PATH as a dangling symlink. After installing, confirm with `conductor-cli --version`.
 
 Authentication is `CONDUCTOR_API_KEY`. Inside a Conductor workspace it is already injected — do not ask the user for it. Outside one, the user must export it.
 
