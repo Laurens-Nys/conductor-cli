@@ -14,22 +14,36 @@ Usage: conductor-cli <command> [arguments] [flags]
 
 Commands
   me                                       Show the authenticated identity
+  models                                   List accepted models and efforts (live OpenAPI)
   projects list                            List projects
+    [--limit <n>] [--offset <n>] [--all]
   projects get <projectId>                 Show one project
-  workspaces list <projectId>              List a project's workspaces
+  workspaces list [projectId]              List project or organization workspaces
+    [--mine] [--creator <id>] [--since <date>] [--state <state>]...
+    [--repo <url-or-id>] [--name <substring>] [--include-archived]
+    [--limit <n>] [--offset <n>] [--all]
   workspaces create                        Create a workspace (and its first session)
-    --project <id> | --repo <url>          exactly one of the two
+    --project <id> | --repo <url>          required outside a Conductor workspace
+    --project-id and --repo-url are aliases
     [--branch <name>] [--name <name>] [--session-name <name>]
-    [--agent <agent>] [--model <model>] [--effort <effort>] [--env KEY=VALUE]...
-  workspaces get <workspaceId>             Show one workspace
-  workspaces rename <workspaceId> <name>   Rename a workspace
-  workspaces archive <workspaceId>         Archive a workspace
-  workspaces status <workspaceId>          Workspace lifecycle status
-  sessions list <workspaceId>              List a workspace's sessions
-  sessions create --workspace <id> --agent <agent>
-    [--name <name>] [--model <model>] [--effort <effort>] [--fast] [--session-id <id>]
+    [--agent <agent>] [--model <model>] [--effort <effort>] [--fast]
+    [--message <text> | --message-file <path>] [--env KEY=VALUE]... [--restricted]
+  workspaces get [workspaceId]             Show one workspace
+  workspaces rename [workspaceId] --name <name>  Rename a workspace
+    Positional <workspaceId> <name> remains supported
+  workspaces archive [workspaceId]         Archive a workspace
+  workspaces unarchive [workspaceId]       Restore an archived workspace
+  workspaces sleep [workspaceId]           Put a workspace to sleep
+  workspaces status [workspaceId]          Workspace lifecycle status
+  sessions list [workspaceId]              List a workspace's sessions
+    [--include-archived] [--limit <n>] [--offset <n>] [--all]
+  sessions create [--workspace <id>] --agent <agent>
+    [--name <name>] [--model <model>] [--effort <effort>] [--fast]
+    [--session-id <id>] [--message-id <id>]
+    [--message <text> | --message-file <path>]
   sessions get <sessionId>                 Show one session
-  sessions rename <sessionId> <name>       Rename a session
+  sessions rename <sessionId> --name <name>  Rename a session
+    Positional <sessionId> <name> remains supported
   sessions archive <sessionId>             Archive a session
   sessions status <sessionId>              Session status (idle | working | error)
   sessions cancel <sessionId>              Cancel a running session
@@ -40,30 +54,36 @@ Commands
   messages list <sessionId>                List session messages as digest rows
     [--limit <n>] [--offset <n>] [--after <messageId>] [--all]
   messages send <sessionId> [text]         Queue a user message
-    [--file <path>] [--id <messageId>]     reads stdin when text and --file are absent
+    [--message <text>] [--message-file <path>] [--message-id <id>]
+    --file and --id remain as aliases; reads stdin when message input is absent
   messages get <messageId>                 Show one message with full content
   sql <query>                              Read-only SQL over session transcripts
   api <METHOD> <path> [--body <json>]      Raw request, e.g. api GET /v0/projects
 
 Flags
   --json           Print raw API JSON instead of TOON
+  --token <token>  API token (overrides environment variables)
   --api-url <url>  Override the API base URL (default ${DEFAULT_API_URL})
   --channel <name> Desktop-app channel that deepLinks in responses should open
-                   (forwarded to workspace/session create, get, rename, list)
+                   (forwarded wherever the API supports it)
   --version        Print the CLI version
   --help           Show this help
 
 Environment
-  CONDUCTOR_API_KEY      Required. Conductor injects it inside workspaces.
+  CONDUCTOR_API_KEY      Personal API key; takes precedence over workspace token.
+  CONDUCTOR_API_TOKEN    Workspace-scoped token in supported cloud workspaces.
   CONDUCTOR_API_URL      Optional base URL override.
   CONDUCTOR_SESSION_ID   Optional; sent as x-conductor-session-id when present.
 `
 
 const OPTIONS = {
   json: { type: "boolean" },
+  token: { type: "string" },
   "api-url": { type: "string" },
   project: { type: "string" },
+  "project-id": { type: "string" },
   repo: { type: "string" },
+  "repo-url": { type: "string" },
   branch: { type: "string" },
   name: { type: "string" },
   "session-name": { type: "string" },
@@ -73,8 +93,18 @@ const OPTIONS = {
   env: { type: "string", multiple: true },
   workspace: { type: "string" },
   fast: { type: "boolean" },
+  "fast-mode": { type: "boolean" },
   "session-id": { type: "string" },
+  message: { type: "string" },
+  "message-file": { type: "string" },
+  "message-id": { type: "string" },
   channel: { type: "string" },
+  creator: { type: "string" },
+  mine: { type: "boolean" },
+  since: { type: "string" },
+  state: { type: "string", multiple: true },
+  "include-archived": { type: "boolean" },
+  restricted: { type: "boolean" },
   "for-message": { type: "string" },
   limit: { type: "string" },
   offset: { type: "string" },
@@ -173,9 +203,12 @@ export async function run(argv: string[], {
 }
 
 async function dispatch(positionals: string[], values: Flags, context: Context): Promise<string> {
-  const request = createClient(values, context)
   const [noun, verb, ...args] = positionals
 
+  if ((noun === "models" || noun === "model") && !verb) {
+    return modelsCommand(createClient(values, context, false), values)
+  }
+  const request = createClient(values, context)
   if (noun === "me" && !verb) {
     return render(await request("GET", "/me"), values)
   }
@@ -189,7 +222,7 @@ async function dispatch(positionals: string[], values: Flags, context: Context):
     return projectsCommand(request, verb, args, values)
   }
   if (noun === "workspaces") {
-    return workspacesCommand(request, verb, args, values)
+    return workspacesCommand(request, verb, args, values, context)
   }
   if (noun === "sessions") {
     return sessionsCommand(request, verb, args, values, context)
@@ -200,20 +233,20 @@ async function dispatch(positionals: string[], values: Flags, context: Context):
   throw unknownCommand(positionals)
 }
 
-function createClient(values: Flags, { env, fetchImpl }: Context): RequestFn {
+function createClient(values: Flags, { env, fetchImpl }: Context, requireAuthentication = true): RequestFn {
   const base = (values["api-url"] || env.CONDUCTOR_API_URL || DEFAULT_API_URL).replace(/\/+$/, "")
-  const apiKey = env.CONDUCTOR_API_KEY
-  if (!apiKey) {
+  const token = values.token || env.CONDUCTOR_API_KEY || env.CONDUCTOR_API_TOKEN
+  if (requireAuthentication && !token) {
     throw new CliError(
-      "CONDUCTOR_API_KEY is not set. Conductor injects it inside workspaces; elsewhere create an API key in Conductor settings and export it.",
+      "No API token found. Pass --token, set CONDUCTOR_API_KEY, or use CONDUCTOR_API_TOKEN in an enabled cloud workspace.",
     )
   }
 
   return async function request(method, path, body) {
     const headers: Record<string, string> = {
-      authorization: `Bearer ${apiKey}`,
       "user-agent": `conductor-cli/${packageJson.version}`,
     }
+    if (token) headers.authorization = `Bearer ${token}`
     if (env.CONDUCTOR_SESSION_ID) {
       headers["x-conductor-session-id"] = env.CONDUCTOR_SESSION_ID
     }
@@ -249,9 +282,58 @@ function createClient(values: Flags, { env, fetchImpl }: Context): RequestFn {
   }
 }
 
+async function modelsCommand(request: RequestFn, values: Flags): Promise<string> {
+  const spec = await request("GET", "/v0/openapi.json")
+  const description = spec?.paths?.["/v0/workspaces"]?.post?.description
+  if (typeof description !== "string") {
+    throw new CliError("The live OpenAPI document does not describe workspace models")
+  }
+  // The request schema exposes one flat model union; the generated operation
+  // description is the public contract that preserves model-to-agent mapping.
+  // Parse it live and fail clearly if its format changes rather than serving a
+  // baked-in catalog that silently becomes stale.
+  const models = parseAgentSection(
+    description,
+    "Accepted model ids by agent — ",
+    ". Accepted effort levels by agent",
+  )
+  const efforts = parseAgentSection(
+    description,
+    "Accepted effort levels by agent — ",
+    "; codex max requires",
+  )
+  const fastModeModels = parseAgentSection(
+    description,
+    "Models accepting fastMode by agent — ",
+    ". Omit fastMode",
+  )
+  const agents = ["claude", "codex", "cursor"].map((agent) => ({
+    agent,
+    models: models[agent] ?? [],
+    efforts: efforts[agent] ?? [],
+    fastModeModels: fastModeModels[agent] ?? [],
+  }))
+  if (agents.some((agent) => agent.models.length === 0)) {
+    throw new CliError("Could not parse the current model catalog from the live OpenAPI document")
+  }
+  return render({ agents }, values)
+}
+
+function parseAgentSection(description: string, startMarker: string, endMarker: string): Record<string, string[]> {
+  const start = description.indexOf(startMarker)
+  const end = start < 0 ? -1 : description.indexOf(endMarker, start + startMarker.length)
+  if (start < 0 || end < 0) return {}
+  const section = description.slice(start + startMarker.length, end)
+  const values: Record<string, string[]> = {}
+  for (const match of section.matchAll(/(?:^|;\s*)(claude|codex|cursor):\s*([^;]+)/g)) {
+    values[match[1]!] = match[2]!.split(",").map((value) => value.trim()).filter(Boolean)
+  }
+  return values
+}
+
 async function projectsCommand(request: RequestFn, verb: string | undefined, args: string[], values: Flags): Promise<string> {
   if (verb === "list") {
-    return render(await request("GET", `/v0/projects${pageQuery(values)}`), values)
+    return render(await offsetList(request, "/v0/projects", values), values)
   }
   if (verb === "get") {
     return render(await request("GET", `/v0/projects/${requireId(args[0], "projectId")}`), values)
@@ -259,43 +341,102 @@ async function projectsCommand(request: RequestFn, verb: string | undefined, arg
   throw unknownCommand(["projects", verb])
 }
 
-async function workspacesCommand(request: RequestFn, verb: string | undefined, args: string[], values: Flags): Promise<string> {
+async function workspacesCommand(
+  request: RequestFn,
+  verb: string | undefined,
+  args: string[],
+  values: Flags,
+  context: Context,
+): Promise<string> {
   if (verb === "list") {
-    return render(await request("GET", `/v0/projects/${requireId(args[0], "projectId")}/workspaces${pageQuery(values)}`), values)
+    const projectId = args[0]
+    if (projectId) {
+      if (values.mine || values.creator || values.since || values.state || values.repo || values.name || values["include-archived"]) {
+        throw new CliError("Workspace filters require an organization-wide list; omit projectId")
+      }
+      const params = new URLSearchParams()
+      addChannelParam(params, values)
+      return render(await offsetList(request, `/v0/projects/${requireId(projectId, "projectId")}/workspaces`, values, params), values)
+    }
+    if (values.mine && values.creator) {
+      throw new CliError("workspaces list takes --mine or --creator, not both")
+    }
+    const params = new URLSearchParams()
+    let creator = values.creator
+    if (values.mine) {
+      const identity = await request("GET", "/me")
+      if (typeof identity?.userId !== "string" || !identity.userId) {
+        throw new CliError("Conductor did not return a user id for --mine")
+      }
+      creator = identity.userId
+    }
+    if (creator) params.set("creator", creator)
+    if (values.since) params.set("since", values.since)
+    for (const state of values.state ?? []) params.append("state", state)
+    if (values.repo) params.set("repo", values.repo)
+    if (values.name) params.set("name", values.name)
+    if (values["include-archived"]) params.set("includeArchived", "true")
+    addChannelParam(params, values)
+    return render(await offsetList(request, "/v0/workspaces", values, params), values)
   }
   if (verb === "create") {
-    return render(await request("POST", `/v0/workspaces${channelQuery(values)}`, workspaceCreateBody(values)), values)
+    const body = await workspaceCreateBody(request, values, context)
+    return render(await request("POST", `/v0/workspaces${channelQuery(values)}`, body), values)
   }
   if (verb === "get") {
-    return render(await request("GET", `/v0/workspaces/${requireId(args[0], "workspaceId")}${channelQuery(values)}`), values)
+    return render(await request("GET", `/v0/workspaces/${currentWorkspaceId(args[0], context)}${channelQuery(values)}`), values)
   }
   if (verb === "rename") {
-    return render(await request("POST", `/v0/workspaces/${requireId(args[0], "workspaceId")}/rename${channelQuery(values)}`, {
-      name: requireArg(args[1], "name"),
+    return render(await request("POST", `/v0/workspaces/${currentWorkspaceId(args[0], context)}/rename${channelQuery(values)}`, {
+      name: values.name || requireArg(args[1], "name"),
     }), values)
   }
   if (verb === "archive") {
-    return render(await request("POST", `/v0/workspaces/${requireId(args[0], "workspaceId")}/archive`), values)
+    return render(await request("POST", `/v0/workspaces/${currentWorkspaceId(args[0], context)}/archive`), values)
+  }
+  if (verb === "unarchive") {
+    return render(await request("POST", `/v0/workspaces/${currentWorkspaceId(args[0], context)}/unarchive`), values)
+  }
+  if (verb === "sleep") {
+    return render(await request("POST", `/v0/workspaces/${currentWorkspaceId(args[0], context)}/sleep`), values)
   }
   if (verb === "status") {
-    return render(await request("GET", `/v0/workspaces/${requireId(args[0], "workspaceId")}/status`), values)
+    return render(await request("GET", `/v0/workspaces/${currentWorkspaceId(args[0], context)}/status`), values)
   }
   throw unknownCommand(["workspaces", verb])
 }
 
-function workspaceCreateBody(values: Flags): Record<string, unknown> {
-  if (Boolean(values.project) === Boolean(values.repo)) {
-    throw new CliError("workspaces create needs exactly one of --project or --repo")
+async function workspaceCreateBody(request: RequestFn, values: Flags, context: Context): Promise<Record<string, unknown>> {
+  const project = oneAlias(values.project, values["project-id"], "--project", "--project-id")
+  const repo = oneAlias(values.repo, values["repo-url"], "--repo", "--repo-url")
+  if (project && repo) {
+    throw new CliError("workspaces create takes --project or --repo, not both")
   }
-  const body: Record<string, unknown> = values.project
-    ? { projectId: values.project }
-    : { repositoryUrl: values.repo }
+  let resolvedProject = project
+  if (!resolvedProject && !repo) {
+    const workspaceId = rawCurrentWorkspaceId(context.env)
+    if (!workspaceId) {
+      throw new CliError("workspaces create needs --project or --repo outside a Conductor workspace")
+    }
+    const workspace = await request("GET", `/v0/workspaces/${encodeURIComponent(workspaceId)}`)
+    if (typeof workspace?.projectId !== "string" || !workspace.projectId) {
+      throw new CliError("The current workspace is not attached to a reusable project; pass --project or --repo")
+    }
+    resolvedProject = workspace.projectId
+  }
+  const body: Record<string, unknown> = resolvedProject
+    ? { projectId: resolvedProject }
+    : { repositoryUrl: repo }
   if (values.branch) body.branch = values.branch
   if (values.name) body.name = values.name
   if (values["session-name"]) body.sessionName = values["session-name"]
   if (values.agent) body.agent = values.agent
   if (values.model) body.model = values.model
   if (values.effort) body.effort = values.effort
+  if (values.fast || values["fast-mode"]) body.fastMode = true
+  if (values.restricted) body.access = { restricted: true }
+  const message = await optionalMessage(values, context)
+  if (message !== undefined) body.message = message
   let envVars: Record<string, string> | undefined
   for (const pair of values.env ?? []) {
     const separator = pair.indexOf("=")
@@ -311,18 +452,31 @@ function workspaceCreateBody(values: Flags): Record<string, unknown> {
 
 async function sessionsCommand(request: RequestFn, verb: string | undefined, args: string[], values: Flags, context: Context): Promise<string> {
   if (verb === "list") {
-    return render(await request("GET", `/v0/workspaces/${requireId(args[0], "workspaceId")}/sessions${pageQuery(values)}`), values)
+    const params = new URLSearchParams()
+    addChannelParam(params, values)
+    if (values["include-archived"]) params.set("includeArchived", "true")
+    return render(
+      await offsetList(request, `/v0/workspaces/${currentWorkspaceId(args[0], context)}/sessions`, values, params),
+      values,
+    )
   }
   if (verb === "create") {
-    if (!values.workspace || !values.agent) {
-      throw new CliError("sessions create requires --workspace and --agent")
+    if (!values.agent) {
+      throw new CliError("sessions create requires --agent")
     }
-    const body: Record<string, unknown> = { workspaceId: values.workspace, agent: values.agent }
+    const workspaceId = values.workspace || rawCurrentWorkspaceId(context.env)
+    if (!workspaceId) {
+      throw new CliError("sessions create requires --workspace outside a Conductor workspace")
+    }
+    const body: Record<string, unknown> = { workspaceId, agent: values.agent }
     if (values["session-id"]) body.sessionId = values["session-id"]
     if (values.name) body.name = values.name
     if (values.model) body.model = values.model
     if (values.effort) body.effort = values.effort
-    if (values.fast) body.fastMode = true
+    if (values.fast || values["fast-mode"]) body.fastMode = true
+    if (values["message-id"]) body.messageId = values["message-id"]
+    const message = await optionalMessage(values, context)
+    if (message !== undefined) body.message = message
     return render(await request("POST", `/v0/sessions${channelQuery(values)}`, body), values)
   }
   if (verb === "get") {
@@ -330,7 +484,7 @@ async function sessionsCommand(request: RequestFn, verb: string | undefined, arg
   }
   if (verb === "rename") {
     return render(await request("POST", `/v0/sessions/${requireId(args[0], "sessionId")}/rename${channelQuery(values)}`, {
-      name: requireArg(args[1], "name"),
+      name: values.name || requireArg(args[1], "name"),
     }), values)
   }
   if (verb === "archive") {
@@ -526,24 +680,17 @@ function contentText(content: Payload): string {
   return parts.join(" ") || (typeof content.type === "string" ? content.type : "")
 }
 
-async function messagesSendCommand(request: RequestFn, args: string[], values: Flags, { readStdin }: Context): Promise<string> {
+async function messagesSendCommand(request: RequestFn, args: string[], values: Flags, context: Context): Promise<string> {
   const sessionId = requireId(args[0], "sessionId")
-  let message = args.slice(1).join(" ")
-  if (values.file) {
-    if (message) {
-      throw new CliError("messages send takes inline text or --file, not both")
-    }
-    message = await readFile(values.file, "utf8")
-  }
-  if (!message) {
-    message = await readStdin()
-  }
+  let message = await optionalMessage(values, context, args.slice(1).join(" "), true)
+  if (message === undefined) message = await context.readStdin()
   if (!message.trim()) {
-    throw new CliError("messages send needs a non-empty message (inline text, --file, or stdin)")
+    throw new CliError("messages send needs a non-empty message (inline text, a message flag, or stdin)")
   }
   const body: Record<string, unknown> = { message }
-  if (values.id) body.messageId = values.id
-  return render(await request("POST", `/v0/sessions/${sessionId}/messages`, body), values)
+  const messageId = oneAlias(values["message-id"], values.id, "--message-id", "--id")
+  if (messageId) body.messageId = messageId
+  return render(await request("POST", `/v0/sessions/${sessionId}/messages${channelQuery(values)}`, body), values)
 }
 
 async function sqlCommand(request: RequestFn, args: string[], values: Flags, { readStdin }: Context): Promise<string> {
@@ -574,18 +721,127 @@ function render(value: unknown, values: Flags): string {
   return values.json ? JSON.stringify(value, null, 2) : encode(value)
 }
 
+async function offsetList(
+  request: RequestFn,
+  path: string,
+  values: Flags,
+  baseParams = new URLSearchParams(),
+): Promise<Payload> {
+  if (!values.all) {
+    const params = new URLSearchParams(baseParams)
+    if (values.limit !== undefined) params.set("limit", String(integerFlag(values.limit, "limit", 1)))
+    if (values.offset !== undefined) params.set("offset", String(integerFlag(values.offset, "offset", 0)))
+    return request("GET", appendQuery(path, params))
+  }
+
+  const limit = values.limit === undefined ? 100 : integerFlag(values.limit, "limit", 1)
+  const initialOffset = values.offset === undefined ? 0 : integerFlag(values.offset, "offset", 0)
+  let offset = initialOffset
+  const data: Payload[] = []
+  // All non-transcript list endpoints use offset pagination. Advancing by the
+  // number actually returned is safe for short pages; an empty broken page is
+  // also a stopping condition so a bad hasMore value cannot spin forever.
+  for (;;) {
+    const params = new URLSearchParams(baseParams)
+    params.set("limit", String(limit))
+    params.set("offset", String(offset))
+    const page = await request("GET", appendQuery(path, params))
+    const rows = Array.isArray(page?.data) ? page.data : []
+    data.push(...rows)
+    if (!page?.hasMore || rows.length === 0) break
+    offset += rows.length
+  }
+  return { data, offset: initialOffset, hasMore: false }
+}
+
 function pageQuery(values: Flags): string {
   const params = new URLSearchParams()
-  if (values.limit !== undefined) params.set("limit", values.limit)
-  if (values.offset !== undefined) params.set("offset", values.offset)
+  if (values.limit !== undefined) params.set("limit", String(integerFlag(values.limit, "limit", 1)))
+  if (values.offset !== undefined) params.set("offset", String(integerFlag(values.offset, "offset", 0)))
   if (values.after !== undefined) params.set("after", values.after)
+  return queryString(params)
+}
+
+function channelQuery(values: Flags): string {
+  const params = new URLSearchParams()
+  addChannelParam(params, values)
+  return queryString(params)
+}
+
+function addChannelParam(params: URLSearchParams, values: Flags): void {
   if (values.channel !== undefined) params.set("channel", values.channel)
+}
+
+function appendQuery(path: string, params: URLSearchParams): string {
+  return `${path}${queryString(params)}`
+}
+
+function queryString(params: URLSearchParams): string {
   const text = params.toString()
   return text ? `?${text}` : ""
 }
 
-function channelQuery(values: Flags): string {
-  return values.channel === undefined ? "" : `?channel=${encodeURIComponent(values.channel)}`
+function integerFlag(value: string, label: string, minimum: number): number {
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < minimum) {
+    throw new CliError(`--${label} expects an integer of at least ${minimum}, got: ${value}`)
+  }
+  return parsed
+}
+
+function oneAlias(
+  preferred: string | undefined,
+  alias: string | undefined,
+  preferredLabel: string,
+  aliasLabel: string,
+): string | undefined {
+  if (preferred !== undefined && alias !== undefined) {
+    throw new CliError(`Use ${preferredLabel} or ${aliasLabel}, not both`)
+  }
+  return preferred ?? alias
+}
+
+async function optionalMessage(
+  values: Flags,
+  { readStdin }: Pick<Context, "readStdin">,
+  positional = "",
+  allowLegacyFile = false,
+): Promise<string | undefined> {
+  const inline = oneAlias(values.message, positional || undefined, "--message", "positional text")
+  const file = oneAlias(
+    values["message-file"],
+    allowLegacyFile ? values.file : undefined,
+    "--message-file",
+    "--file",
+  )
+  if (inline !== undefined && file !== undefined) {
+    throw new CliError("Use inline message text or a message file, not both")
+  }
+  let message = inline
+  if (file !== undefined) {
+    try {
+      message = file === "-" ? await readStdin() : await readFile(file, "utf8")
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      throw new CliError(`Could not read message file ${file}: ${detail}`)
+    }
+  }
+  if (message !== undefined && !message.trim()) {
+    throw new CliError("Message text must not be empty")
+  }
+  return message
+}
+
+function rawCurrentWorkspaceId(env: Record<string, string | undefined>): string | undefined {
+  return env.CONDUCTOR_WORKSPACE_ID || env.CONDUCTOR_INTERNAL_WORKSPACE_ID
+}
+
+function currentWorkspaceId(value: string | undefined, { env }: Context): string {
+  const workspaceId = value || rawCurrentWorkspaceId(env)
+  if (!workspaceId) {
+    throw new CliError("Missing required argument: workspaceId (or set CONDUCTOR_WORKSPACE_ID)")
+  }
+  return encodeURIComponent(workspaceId)
 }
 
 function requireArg(value: string | undefined, label: string): string {

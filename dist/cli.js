@@ -5,8 +5,8 @@ import { encode } from "@toon-format/toon";
 // package.json
 var package_default = {
   name: "conductor-cli",
-  version: "0.2.1",
-  description: "Unofficial command-line client for the Conductor beta API, with TOON output for coding agents",
+  version: "0.3.0",
+  description: "Unofficial Conductor API companion with agent-oriented waiting, transcripts, and TOON output",
   type: "module",
   license: "MIT",
   repository: "github:Laurens-Nys/conductor-cli",
@@ -45,22 +45,36 @@ Usage: conductor-cli <command> [arguments] [flags]
 
 Commands
   me                                       Show the authenticated identity
+  models                                   List accepted models and efforts (live OpenAPI)
   projects list                            List projects
+    [--limit <n>] [--offset <n>] [--all]
   projects get <projectId>                 Show one project
-  workspaces list <projectId>              List a project's workspaces
+  workspaces list [projectId]              List project or organization workspaces
+    [--mine] [--creator <id>] [--since <date>] [--state <state>]...
+    [--repo <url-or-id>] [--name <substring>] [--include-archived]
+    [--limit <n>] [--offset <n>] [--all]
   workspaces create                        Create a workspace (and its first session)
-    --project <id> | --repo <url>          exactly one of the two
+    --project <id> | --repo <url>          required outside a Conductor workspace
+    --project-id and --repo-url are aliases
     [--branch <name>] [--name <name>] [--session-name <name>]
-    [--agent <agent>] [--model <model>] [--effort <effort>] [--env KEY=VALUE]...
-  workspaces get <workspaceId>             Show one workspace
-  workspaces rename <workspaceId> <name>   Rename a workspace
-  workspaces archive <workspaceId>         Archive a workspace
-  workspaces status <workspaceId>          Workspace lifecycle status
-  sessions list <workspaceId>              List a workspace's sessions
-  sessions create --workspace <id> --agent <agent>
-    [--name <name>] [--model <model>] [--effort <effort>] [--fast] [--session-id <id>]
+    [--agent <agent>] [--model <model>] [--effort <effort>] [--fast]
+    [--message <text> | --message-file <path>] [--env KEY=VALUE]... [--restricted]
+  workspaces get [workspaceId]             Show one workspace
+  workspaces rename [workspaceId] --name <name>  Rename a workspace
+    Positional <workspaceId> <name> remains supported
+  workspaces archive [workspaceId]         Archive a workspace
+  workspaces unarchive [workspaceId]       Restore an archived workspace
+  workspaces sleep [workspaceId]           Put a workspace to sleep
+  workspaces status [workspaceId]          Workspace lifecycle status
+  sessions list [workspaceId]              List a workspace's sessions
+    [--include-archived] [--limit <n>] [--offset <n>] [--all]
+  sessions create [--workspace <id>] --agent <agent>
+    [--name <name>] [--model <model>] [--effort <effort>] [--fast]
+    [--session-id <id>] [--message-id <id>]
+    [--message <text> | --message-file <path>]
   sessions get <sessionId>                 Show one session
-  sessions rename <sessionId> <name>       Rename a session
+  sessions rename <sessionId> --name <name>  Rename a session
+    Positional <sessionId> <name> remains supported
   sessions archive <sessionId>             Archive a session
   sessions status <sessionId>              Session status (idle | working | error)
   sessions cancel <sessionId>              Cancel a running session
@@ -71,29 +85,35 @@ Commands
   messages list <sessionId>                List session messages as digest rows
     [--limit <n>] [--offset <n>] [--after <messageId>] [--all]
   messages send <sessionId> [text]         Queue a user message
-    [--file <path>] [--id <messageId>]     reads stdin when text and --file are absent
+    [--message <text>] [--message-file <path>] [--message-id <id>]
+    --file and --id remain as aliases; reads stdin when message input is absent
   messages get <messageId>                 Show one message with full content
   sql <query>                              Read-only SQL over session transcripts
   api <METHOD> <path> [--body <json>]      Raw request, e.g. api GET /v0/projects
 
 Flags
   --json           Print raw API JSON instead of TOON
+  --token <token>  API token (overrides environment variables)
   --api-url <url>  Override the API base URL (default ${DEFAULT_API_URL})
   --channel <name> Desktop-app channel that deepLinks in responses should open
-                   (forwarded to workspace/session create, get, rename, list)
+                   (forwarded wherever the API supports it)
   --version        Print the CLI version
   --help           Show this help
 
 Environment
-  CONDUCTOR_API_KEY      Required. Conductor injects it inside workspaces.
+  CONDUCTOR_API_KEY      Personal API key; takes precedence over workspace token.
+  CONDUCTOR_API_TOKEN    Workspace-scoped token in supported cloud workspaces.
   CONDUCTOR_API_URL      Optional base URL override.
   CONDUCTOR_SESSION_ID   Optional; sent as x-conductor-session-id when present.
 `;
 var OPTIONS = {
   json: { type: "boolean" },
+  token: { type: "string" },
   "api-url": { type: "string" },
   project: { type: "string" },
+  "project-id": { type: "string" },
   repo: { type: "string" },
+  "repo-url": { type: "string" },
   branch: { type: "string" },
   name: { type: "string" },
   "session-name": { type: "string" },
@@ -103,8 +123,18 @@ var OPTIONS = {
   env: { type: "string", multiple: true },
   workspace: { type: "string" },
   fast: { type: "boolean" },
+  "fast-mode": { type: "boolean" },
   "session-id": { type: "string" },
+  message: { type: "string" },
+  "message-file": { type: "string" },
+  "message-id": { type: "string" },
   channel: { type: "string" },
+  creator: { type: "string" },
+  mine: { type: "boolean" },
+  since: { type: "string" },
+  state: { type: "string", multiple: true },
+  "include-archived": { type: "boolean" },
+  restricted: { type: "boolean" },
   "for-message": { type: "string" },
   limit: { type: "string" },
   offset: { type: "string" },
@@ -164,8 +194,11 @@ async function run(argv, {
   }
 }
 async function dispatch(positionals, values, context) {
-  const request = createClient(values, context);
   const [noun, verb, ...args] = positionals;
+  if ((noun === "models" || noun === "model") && !verb) {
+    return modelsCommand(createClient(values, context, false), values);
+  }
+  const request = createClient(values, context);
   if (noun === "me" && !verb) {
     return render(await request("GET", "/me"), values);
   }
@@ -179,7 +212,7 @@ async function dispatch(positionals, values, context) {
     return projectsCommand(request, verb, args, values);
   }
   if (noun === "workspaces") {
-    return workspacesCommand(request, verb, args, values);
+    return workspacesCommand(request, verb, args, values, context);
   }
   if (noun === "sessions") {
     return sessionsCommand(request, verb, args, values, context);
@@ -189,17 +222,18 @@ async function dispatch(positionals, values, context) {
   }
   throw unknownCommand(positionals);
 }
-function createClient(values, { env, fetchImpl }) {
+function createClient(values, { env, fetchImpl }, requireAuthentication = true) {
   const base = (values["api-url"] || env.CONDUCTOR_API_URL || DEFAULT_API_URL).replace(/\/+$/, "");
-  const apiKey = env.CONDUCTOR_API_KEY;
-  if (!apiKey) {
-    throw new CliError("CONDUCTOR_API_KEY is not set. Conductor injects it inside workspaces; elsewhere create an API key in Conductor settings and export it.");
+  const token = values.token || env.CONDUCTOR_API_KEY || env.CONDUCTOR_API_TOKEN;
+  if (requireAuthentication && !token) {
+    throw new CliError("No API token found. Pass --token, set CONDUCTOR_API_KEY, or use CONDUCTOR_API_TOKEN in an enabled cloud workspace.");
   }
   return async function request(method, path, body) {
     const headers = {
-      authorization: `Bearer ${apiKey}`,
       "user-agent": `conductor-cli/${package_default.version}`
     };
+    if (token)
+      headers.authorization = `Bearer ${token}`;
     if (env.CONDUCTOR_SESSION_ID) {
       headers["x-conductor-session-id"] = env.CONDUCTOR_SESSION_ID;
     }
@@ -234,43 +268,130 @@ function createClient(values, { env, fetchImpl }) {
     return payload;
   };
 }
+async function modelsCommand(request, values) {
+  const spec = await request("GET", "/v0/openapi.json");
+  const description = spec?.paths?.["/v0/workspaces"]?.post?.description;
+  if (typeof description !== "string") {
+    throw new CliError("The live OpenAPI document does not describe workspace models");
+  }
+  const models = parseAgentSection(description, "Accepted model ids by agent — ", ". Accepted effort levels by agent");
+  const efforts = parseAgentSection(description, "Accepted effort levels by agent — ", "; codex max requires");
+  const fastModeModels = parseAgentSection(description, "Models accepting fastMode by agent — ", ". Omit fastMode");
+  const agents = ["claude", "codex", "cursor"].map((agent) => ({
+    agent,
+    models: models[agent] ?? [],
+    efforts: efforts[agent] ?? [],
+    fastModeModels: fastModeModels[agent] ?? []
+  }));
+  if (agents.some((agent) => agent.models.length === 0)) {
+    throw new CliError("Could not parse the current model catalog from the live OpenAPI document");
+  }
+  return render({ agents }, values);
+}
+function parseAgentSection(description, startMarker, endMarker) {
+  const start = description.indexOf(startMarker);
+  const end = start < 0 ? -1 : description.indexOf(endMarker, start + startMarker.length);
+  if (start < 0 || end < 0)
+    return {};
+  const section = description.slice(start + startMarker.length, end);
+  const values = {};
+  for (const match of section.matchAll(/(?:^|;\s*)(claude|codex|cursor):\s*([^;]+)/g)) {
+    values[match[1]] = match[2].split(",").map((value) => value.trim()).filter(Boolean);
+  }
+  return values;
+}
 async function projectsCommand(request, verb, args, values) {
   if (verb === "list") {
-    return render(await request("GET", `/v0/projects${pageQuery(values)}`), values);
+    return render(await offsetList(request, "/v0/projects", values), values);
   }
   if (verb === "get") {
     return render(await request("GET", `/v0/projects/${requireId(args[0], "projectId")}`), values);
   }
   throw unknownCommand(["projects", verb]);
 }
-async function workspacesCommand(request, verb, args, values) {
+async function workspacesCommand(request, verb, args, values, context) {
   if (verb === "list") {
-    return render(await request("GET", `/v0/projects/${requireId(args[0], "projectId")}/workspaces${pageQuery(values)}`), values);
+    const projectId = args[0];
+    if (projectId) {
+      if (values.mine || values.creator || values.since || values.state || values.repo || values.name || values["include-archived"]) {
+        throw new CliError("Workspace filters require an organization-wide list; omit projectId");
+      }
+      const params2 = new URLSearchParams;
+      addChannelParam(params2, values);
+      return render(await offsetList(request, `/v0/projects/${requireId(projectId, "projectId")}/workspaces`, values, params2), values);
+    }
+    if (values.mine && values.creator) {
+      throw new CliError("workspaces list takes --mine or --creator, not both");
+    }
+    const params = new URLSearchParams;
+    let creator = values.creator;
+    if (values.mine) {
+      const identity = await request("GET", "/me");
+      if (typeof identity?.userId !== "string" || !identity.userId) {
+        throw new CliError("Conductor did not return a user id for --mine");
+      }
+      creator = identity.userId;
+    }
+    if (creator)
+      params.set("creator", creator);
+    if (values.since)
+      params.set("since", values.since);
+    for (const state of values.state ?? [])
+      params.append("state", state);
+    if (values.repo)
+      params.set("repo", values.repo);
+    if (values.name)
+      params.set("name", values.name);
+    if (values["include-archived"])
+      params.set("includeArchived", "true");
+    addChannelParam(params, values);
+    return render(await offsetList(request, "/v0/workspaces", values, params), values);
   }
   if (verb === "create") {
-    return render(await request("POST", `/v0/workspaces${channelQuery(values)}`, workspaceCreateBody(values)), values);
+    const body = await workspaceCreateBody(request, values, context);
+    return render(await request("POST", `/v0/workspaces${channelQuery(values)}`, body), values);
   }
   if (verb === "get") {
-    return render(await request("GET", `/v0/workspaces/${requireId(args[0], "workspaceId")}${channelQuery(values)}`), values);
+    return render(await request("GET", `/v0/workspaces/${currentWorkspaceId(args[0], context)}${channelQuery(values)}`), values);
   }
   if (verb === "rename") {
-    return render(await request("POST", `/v0/workspaces/${requireId(args[0], "workspaceId")}/rename${channelQuery(values)}`, {
-      name: requireArg(args[1], "name")
+    return render(await request("POST", `/v0/workspaces/${currentWorkspaceId(args[0], context)}/rename${channelQuery(values)}`, {
+      name: values.name || requireArg(args[1], "name")
     }), values);
   }
   if (verb === "archive") {
-    return render(await request("POST", `/v0/workspaces/${requireId(args[0], "workspaceId")}/archive`), values);
+    return render(await request("POST", `/v0/workspaces/${currentWorkspaceId(args[0], context)}/archive`), values);
+  }
+  if (verb === "unarchive") {
+    return render(await request("POST", `/v0/workspaces/${currentWorkspaceId(args[0], context)}/unarchive`), values);
+  }
+  if (verb === "sleep") {
+    return render(await request("POST", `/v0/workspaces/${currentWorkspaceId(args[0], context)}/sleep`), values);
   }
   if (verb === "status") {
-    return render(await request("GET", `/v0/workspaces/${requireId(args[0], "workspaceId")}/status`), values);
+    return render(await request("GET", `/v0/workspaces/${currentWorkspaceId(args[0], context)}/status`), values);
   }
   throw unknownCommand(["workspaces", verb]);
 }
-function workspaceCreateBody(values) {
-  if (Boolean(values.project) === Boolean(values.repo)) {
-    throw new CliError("workspaces create needs exactly one of --project or --repo");
+async function workspaceCreateBody(request, values, context) {
+  const project = oneAlias(values.project, values["project-id"], "--project", "--project-id");
+  const repo = oneAlias(values.repo, values["repo-url"], "--repo", "--repo-url");
+  if (project && repo) {
+    throw new CliError("workspaces create takes --project or --repo, not both");
   }
-  const body = values.project ? { projectId: values.project } : { repositoryUrl: values.repo };
+  let resolvedProject = project;
+  if (!resolvedProject && !repo) {
+    const workspaceId = rawCurrentWorkspaceId(context.env);
+    if (!workspaceId) {
+      throw new CliError("workspaces create needs --project or --repo outside a Conductor workspace");
+    }
+    const workspace = await request("GET", `/v0/workspaces/${encodeURIComponent(workspaceId)}`);
+    if (typeof workspace?.projectId !== "string" || !workspace.projectId) {
+      throw new CliError("The current workspace is not attached to a reusable project; pass --project or --repo");
+    }
+    resolvedProject = workspace.projectId;
+  }
+  const body = resolvedProject ? { projectId: resolvedProject } : { repositoryUrl: repo };
   if (values.branch)
     body.branch = values.branch;
   if (values.name)
@@ -283,6 +404,13 @@ function workspaceCreateBody(values) {
     body.model = values.model;
   if (values.effort)
     body.effort = values.effort;
+  if (values.fast || values["fast-mode"])
+    body.fastMode = true;
+  if (values.restricted)
+    body.access = { restricted: true };
+  const message = await optionalMessage(values, context);
+  if (message !== undefined)
+    body.message = message;
   let envVars;
   for (const pair of values.env ?? []) {
     const separator = pair.indexOf("=");
@@ -298,13 +426,21 @@ function workspaceCreateBody(values) {
 }
 async function sessionsCommand(request, verb, args, values, context) {
   if (verb === "list") {
-    return render(await request("GET", `/v0/workspaces/${requireId(args[0], "workspaceId")}/sessions${pageQuery(values)}`), values);
+    const params = new URLSearchParams;
+    addChannelParam(params, values);
+    if (values["include-archived"])
+      params.set("includeArchived", "true");
+    return render(await offsetList(request, `/v0/workspaces/${currentWorkspaceId(args[0], context)}/sessions`, values, params), values);
   }
   if (verb === "create") {
-    if (!values.workspace || !values.agent) {
-      throw new CliError("sessions create requires --workspace and --agent");
+    if (!values.agent) {
+      throw new CliError("sessions create requires --agent");
     }
-    const body = { workspaceId: values.workspace, agent: values.agent };
+    const workspaceId = values.workspace || rawCurrentWorkspaceId(context.env);
+    if (!workspaceId) {
+      throw new CliError("sessions create requires --workspace outside a Conductor workspace");
+    }
+    const body = { workspaceId, agent: values.agent };
     if (values["session-id"])
       body.sessionId = values["session-id"];
     if (values.name)
@@ -313,8 +449,13 @@ async function sessionsCommand(request, verb, args, values, context) {
       body.model = values.model;
     if (values.effort)
       body.effort = values.effort;
-    if (values.fast)
+    if (values.fast || values["fast-mode"])
       body.fastMode = true;
+    if (values["message-id"])
+      body.messageId = values["message-id"];
+    const message = await optionalMessage(values, context);
+    if (message !== undefined)
+      body.message = message;
     return render(await request("POST", `/v0/sessions${channelQuery(values)}`, body), values);
   }
   if (verb === "get") {
@@ -322,7 +463,7 @@ async function sessionsCommand(request, verb, args, values, context) {
   }
   if (verb === "rename") {
     return render(await request("POST", `/v0/sessions/${requireId(args[0], "sessionId")}/rename${channelQuery(values)}`, {
-      name: requireArg(args[1], "name")
+      name: values.name || requireArg(args[1], "name")
     }), values);
   }
   if (verb === "archive") {
@@ -492,25 +633,19 @@ function contentText(content) {
   }
   return parts.join(" ") || (typeof content.type === "string" ? content.type : "");
 }
-async function messagesSendCommand(request, args, values, { readStdin }) {
+async function messagesSendCommand(request, args, values, context) {
   const sessionId = requireId(args[0], "sessionId");
-  let message = args.slice(1).join(" ");
-  if (values.file) {
-    if (message) {
-      throw new CliError("messages send takes inline text or --file, not both");
-    }
-    message = await readFile(values.file, "utf8");
-  }
-  if (!message) {
-    message = await readStdin();
-  }
+  let message = await optionalMessage(values, context, args.slice(1).join(" "), true);
+  if (message === undefined)
+    message = await context.readStdin();
   if (!message.trim()) {
-    throw new CliError("messages send needs a non-empty message (inline text, --file, or stdin)");
+    throw new CliError("messages send needs a non-empty message (inline text, a message flag, or stdin)");
   }
   const body = { message };
-  if (values.id)
-    body.messageId = values.id;
-  return render(await request("POST", `/v0/sessions/${sessionId}/messages`, body), values);
+  const messageId = oneAlias(values["message-id"], values.id, "--message-id", "--id");
+  if (messageId)
+    body.messageId = messageId;
+  return render(await request("POST", `/v0/sessions/${sessionId}/messages${channelQuery(values)}`, body), values);
 }
 async function sqlCommand(request, args, values, { readStdin }) {
   const query = args.join(" ") || await readStdin();
@@ -537,21 +672,100 @@ async function apiCommand(request, args, values) {
 function render(value, values) {
   return values.json ? JSON.stringify(value, null, 2) : encode(value);
 }
+async function offsetList(request, path, values, baseParams = new URLSearchParams) {
+  if (!values.all) {
+    const params = new URLSearchParams(baseParams);
+    if (values.limit !== undefined)
+      params.set("limit", String(integerFlag(values.limit, "limit", 1)));
+    if (values.offset !== undefined)
+      params.set("offset", String(integerFlag(values.offset, "offset", 0)));
+    return request("GET", appendQuery(path, params));
+  }
+  const limit = values.limit === undefined ? 100 : integerFlag(values.limit, "limit", 1);
+  const initialOffset = values.offset === undefined ? 0 : integerFlag(values.offset, "offset", 0);
+  let offset = initialOffset;
+  const data = [];
+  for (;; ) {
+    const params = new URLSearchParams(baseParams);
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    const page = await request("GET", appendQuery(path, params));
+    const rows = Array.isArray(page?.data) ? page.data : [];
+    data.push(...rows);
+    if (!page?.hasMore || rows.length === 0)
+      break;
+    offset += rows.length;
+  }
+  return { data, offset: initialOffset, hasMore: false };
+}
 function pageQuery(values) {
   const params = new URLSearchParams;
   if (values.limit !== undefined)
-    params.set("limit", values.limit);
+    params.set("limit", String(integerFlag(values.limit, "limit", 1)));
   if (values.offset !== undefined)
-    params.set("offset", values.offset);
+    params.set("offset", String(integerFlag(values.offset, "offset", 0)));
   if (values.after !== undefined)
     params.set("after", values.after);
+  return queryString(params);
+}
+function channelQuery(values) {
+  const params = new URLSearchParams;
+  addChannelParam(params, values);
+  return queryString(params);
+}
+function addChannelParam(params, values) {
   if (values.channel !== undefined)
     params.set("channel", values.channel);
+}
+function appendQuery(path, params) {
+  return `${path}${queryString(params)}`;
+}
+function queryString(params) {
   const text = params.toString();
   return text ? `?${text}` : "";
 }
-function channelQuery(values) {
-  return values.channel === undefined ? "" : `?channel=${encodeURIComponent(values.channel)}`;
+function integerFlag(value, label, minimum) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum) {
+    throw new CliError(`--${label} expects an integer of at least ${minimum}, got: ${value}`);
+  }
+  return parsed;
+}
+function oneAlias(preferred, alias, preferredLabel, aliasLabel) {
+  if (preferred !== undefined && alias !== undefined) {
+    throw new CliError(`Use ${preferredLabel} or ${aliasLabel}, not both`);
+  }
+  return preferred ?? alias;
+}
+async function optionalMessage(values, { readStdin }, positional = "", allowLegacyFile = false) {
+  const inline = oneAlias(values.message, positional || undefined, "--message", "positional text");
+  const file = oneAlias(values["message-file"], allowLegacyFile ? values.file : undefined, "--message-file", "--file");
+  if (inline !== undefined && file !== undefined) {
+    throw new CliError("Use inline message text or a message file, not both");
+  }
+  let message = inline;
+  if (file !== undefined) {
+    try {
+      message = file === "-" ? await readStdin() : await readFile(file, "utf8");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new CliError(`Could not read message file ${file}: ${detail}`);
+    }
+  }
+  if (message !== undefined && !message.trim()) {
+    throw new CliError("Message text must not be empty");
+  }
+  return message;
+}
+function rawCurrentWorkspaceId(env) {
+  return env.CONDUCTOR_WORKSPACE_ID || env.CONDUCTOR_INTERNAL_WORKSPACE_ID;
+}
+function currentWorkspaceId(value, { env }) {
+  const workspaceId = value || rawCurrentWorkspaceId(env);
+  if (!workspaceId) {
+    throw new CliError("Missing required argument: workspaceId (or set CONDUCTOR_WORKSPACE_ID)");
+  }
+  return encodeURIComponent(workspaceId);
 }
 function requireArg(value, label) {
   if (!value) {
