@@ -1,7 +1,7 @@
 {
   "name": "conductor-cli",
-  "version": "0.2.1",
-  "description": "Unofficial command-line client for the Conductor beta API, with TOON output for coding agents",
+  "version": "0.3.0",
+  "description": "Unofficial Conductor API companion with agent-oriented waiting, transcripts, and TOON output",
   "type": "module",
   "license": "MIT",
   "repository": "github:Laurens-Nys/conductor-cli",

@@ -1,16 +1,16 @@
 ---
 name: conductor-cli
-description: Drive Conductor workspaces and agent sessions from the command line with conductor-cli - list projects and workspaces, create workspaces and sessions, queue messages to sibling agent sessions, wait for them to go idle, and read their transcripts. Use when a task needs to orchestrate, message, or inspect Conductor sessions from a shell, script, or another agent session.
-allowed-tools: Bash(conductor-cli:*), Bash(npx:*)
+description: Drive Conductor with the unofficial conductor-cli when a task needs race-safe session waiting, Markdown transcripts, TOON output, exhaustive pagination, a raw REST escape hatch, or external shell automation. Prefer Conductor's bundled official conductor CLI for ordinary in-app workspace management.
+allowed-tools: Bash(conductor:*), Bash(conductor-cli:*), Bash(npx:*)
 ---
 
 # conductor-cli
 
-Unofficial CLI for the Conductor beta API. The API is beta and unversioned in practice; when a command fails unexpectedly, trust the API error over this document.
+Unofficial companion CLI for the Conductor beta API. The API is beta and unversioned in practice; when a command fails unexpectedly, trust the API error over this document.
 
 ## Prerequisites
 
-The `conductor-cli` command must be on PATH. To check:
+Conductor workspaces also provide an official command named `conductor`. Prefer that tool for ordinary workspace operations. Use `conductor-cli` for its agent-oriented composites and compact output, or when running outside Conductor. Check whether it is installed:
 
 ```bash
 conductor-cli --version
@@ -24,36 +24,39 @@ npm install -g https://github.com/Laurens-Nys/conductor-cli/archive/refs/heads/m
 
 Use that tarball URL rather than `npm install -g github:Laurens-Nys/conductor-cli` — on some npm versions the git spec installs an empty package and leaves `conductor-cli` on PATH as a dangling symlink. After installing, confirm with `conductor-cli --version`.
 
-Authentication is `CONDUCTOR_API_KEY`. Inside a Conductor workspace it is already injected — do not ask the user for it. Outside one, the user must export it.
+Authentication precedence is `--token`, then `CONDUCTOR_API_KEY`, then `CONDUCTOR_API_TOKEN`. The workspace-scoped token is available only in supported cloud workspaces where automatic API access is enabled. `models`, `--help`, and `--version` do not require credentials.
 
 ## Scope of the API
 
 The API addresses Cloud workspaces and API-created sessions. The local Mac workspace you may be running in is not addressable through it: querying your own `CONDUCTOR_SESSION_ID` returns `Session not found`, and that is expected, not an error to fix.
 
-Do not archive, cancel, or rename workspaces or sessions you did not create in the current task.
+Do not archive, unarchive, sleep, cancel, or rename workspaces or sessions you did not create in the current task.
 
 ## Commands
 
 ```bash
 conductor-cli me
+conductor-cli models
 conductor-cli projects list
 conductor-cli projects get <projectId>
-conductor-cli workspaces list <projectId>
-conductor-cli workspaces create --project <id>|--repo <url> [--branch <b>] [--name <n>] [--session-name <n>] [--agent <a>] [--model <m>] [--effort <e>] [--env K=V]...
-conductor-cli workspaces get|rename|archive|status <workspaceId>
-conductor-cli sessions list <workspaceId>
-conductor-cli sessions create --workspace <id> --agent <a> [--name <n>] [--model <m>] [--effort <e>] [--fast] [--session-id <id>]
+conductor-cli workspaces list [projectId] [--mine] [--creator <id>] [--since <date>] [--state <state>] [--repo <repo>] [--name <text>] [--include-archived] [--all]
+conductor-cli workspaces create --project <id>|--repo <url> [--branch <b>] [--name <n>] [--session-name <n>] [--agent <a>] [--model <m>] [--effort <e>] [--fast] [--message <text>|--message-file <path>] [--env K=V]... [--restricted]
+conductor-cli workspaces get|rename|archive|unarchive|sleep|status [<workspaceId>]
+conductor-cli sessions list [workspaceId] [--include-archived] [--all]
+conductor-cli sessions create [--workspace <id>] --agent <a> [--name <n>] [--model <m>] [--effort <e>] [--fast] [--session-id <id>] [--message-id <id>] [--message <text>|--message-file <path>]
 conductor-cli sessions get|rename|archive|status|cancel <sessionId>
 conductor-cli sessions wait <sessionId> [--timeout <seconds>] [--interval <seconds>] [--for-message <messageId>]
 conductor-cli sessions transcript <sessionId>
 conductor-cli messages list <sessionId> [--limit <n>] [--offset <n>] [--after <id>] [--all]
-conductor-cli messages send <sessionId> [text] [--file <path>] [--id <messageId>]
+conductor-cli messages send <sessionId> [text] [--message <text>|--message-file <path>] [--message-id <id>]
 conductor-cli messages get <messageId>
 conductor-cli sql <query>
 conductor-cli api <METHOD> <path> [--body <json>]
 ```
 
-Output is TOON by default (compact tabular text, cheap in context). Add `--json` for the raw API payload. `sessions transcript` prints plain markdown. Workspace/session create, get, rename, and list commands also take `--channel <name>` to pick the desktop-app channel that `deepLink` fields in responses open.
+Output is TOON by default (compact tabular text, cheap in context). Add `--json` for the raw API payload. `sessions transcript` prints plain markdown. Use `--all` to exhaust offset-paginated project, workspace, and session lists. Workspace/session operations and message sending take `--channel <name>` where the API returns a desktop deep link.
+
+Run `conductor-cli models` before choosing a model or effort; it reads the current combinations from the live OpenAPI document. Inside a Conductor workspace, workspace arguments and the project for workspace creation default from `CONDUCTOR_WORKSPACE_ID` when possible. Use `workspaces list --mine` for possessive requests instead of returning organization-wide results.
 
 ## Driving a sibling worker session
 
@@ -80,7 +83,7 @@ Rules of the flow:
 
 ## Querying transcripts in bulk
 
-`sql` runs read-only SQL over `session_transcripts_view` with columns `session_id`, `workspace_id`, `transcript`, `session_title`, `agent_type`, `model`, `workspace_name`, `workspace_state`, `repo_url`, `session_created_at`, `transcript_updated_at`, `workspace_created_at`, `workspace_creator_id`:
+`sql` runs read-only SQL over `session_transcripts_view` with columns `session_id`, `workspace_id`, `transcript`, `session_title`, `agent_type`, `model`, `workspace_name`, `workspace_state`, `repo_url`, `session_created_at`, `transcript_updated_at`, `workspace_created_at`, `workspace_creator_id`, `workspace_creator_name`:
 
 ```bash
 conductor-cli sql "SELECT session_id, session_title, workspace_state FROM session_transcripts_view ORDER BY transcript_updated_at DESC LIMIT 10"

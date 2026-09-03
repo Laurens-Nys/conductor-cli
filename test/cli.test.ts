@@ -106,9 +106,68 @@ test("--json prints the raw payload", async () => {
   assert.deepEqual(JSON.parse(out), { userId: "u1", authMethod: "api-key" })
 })
 
+test("models reads the current catalog from OpenAPI without credentials", async () => {
+  const description = [
+    "Create a workspace.",
+    "Accepted model ids by agent — claude: sonnet-current, opus-current; codex: gpt-current; cursor: auto, grok-current.",
+    "Accepted effort levels by agent — claude: low, high; codex: none, high; cursor: low, medium; codex max requires a current model.",
+    "Models accepting fastMode by agent — claude: opus-current; codex: gpt-current; cursor: auto, grok-current. Omit fastMode for other models.",
+  ].join(" ")
+  const { code, calls, out } = await runCli(["models", "--json"], {
+    env: {},
+    responses: [{ payload: { paths: { "/v0/workspaces": { post: { description } } } } }],
+  })
+  assert.equal(code, 0)
+  assert.equal(calls[0]!.url, "https://api.conductor.build/v0/openapi.json")
+  assert.equal(calls[0]!.headers.authorization, undefined)
+  assert.deepEqual(JSON.parse(out), {
+    agents: [
+      { agent: "claude", models: ["sonnet-current", "opus-current"], efforts: ["low", "high"], fastModeModels: ["opus-current"] },
+      { agent: "codex", models: ["gpt-current"], efforts: ["none", "high"], fastModeModels: ["gpt-current"] },
+      { agent: "cursor", models: ["auto", "grok-current"], efforts: ["low", "medium"], fastModeModels: ["auto", "grok-current"] },
+    ],
+  })
+})
+
 test("list pagination flags become query parameters", async () => {
   const { calls } = await runCli(["workspaces", "list", "p1", "--limit", "5", "--offset", "10"])
   assert.equal(calls[0]!.url, "https://api.conductor.build/v0/projects/p1/workspaces?limit=5&offset=10")
+})
+
+test("organization workspace listing supports mine, filters, and all-page aggregation", async () => {
+  const { code, calls, out } = await runCli([
+    "workspaces", "list", "--mine", "--since", "2026-09-01", "--state", "ready", "--state", "sleeping",
+    "--repo", "acme/app", "--name", "parser", "--include-archived", "--channel", "beta",
+    "--limit", "2", "--all", "--json",
+  ], {
+    responses: [
+      { payload: { userId: "u1", authMethod: "api-key" } },
+      { payload: { data: [{ id: "w1" }, { id: "w2" }], offset: 0, hasMore: true } },
+      { payload: { data: [{ id: "w3" }], offset: 2, hasMore: false } },
+    ],
+  })
+  assert.equal(code, 0)
+  assert.equal(calls[0]!.url, "https://api.conductor.build/me")
+  const filters = "creator=u1&since=2026-09-01&state=ready&state=sleeping&repo=acme%2Fapp&name=parser&includeArchived=true&channel=beta"
+  assert.equal(calls[1]!.url, `https://api.conductor.build/v0/workspaces?${filters}&limit=2&offset=0`)
+  assert.equal(calls[2]!.url, `https://api.conductor.build/v0/workspaces?${filters}&limit=2&offset=2`)
+  assert.deepEqual(JSON.parse(out), {
+    data: [{ id: "w1" }, { id: "w2" }, { id: "w3" }],
+    offset: 0,
+    hasMore: false,
+  })
+})
+
+test("offset list --all stops when a broken page is empty", async () => {
+  const { code, calls, out } = await runCli(["projects", "list", "--all", "--json"], {
+    responses: [
+      { payload: { data: [{ id: "p1" }], offset: 0, hasMore: true } },
+      { payload: { data: [], offset: 1, hasMore: true } },
+    ],
+  })
+  assert.equal(code, 0)
+  assert.equal(calls.length, 2)
+  assert.deepEqual(JSON.parse(out).data, [{ id: "p1" }])
 })
 
 test("workspaces create maps flags to the request body", async () => {
@@ -121,6 +180,9 @@ test("workspaces create maps flags to the request body", async () => {
     "--agent", "claude",
     "--model", "fable-5",
     "--effort", "high",
+    "--fast-mode",
+    "--message", "start now",
+    "--restricted",
     "--env", "FOO=bar",
     "--env", "BAZ=qux=1",
   ])
@@ -135,25 +197,81 @@ test("workspaces create maps flags to the request body", async () => {
     agent: "claude",
     model: "fable-5",
     effort: "high",
+    fastMode: true,
+    message: "start now",
+    access: { restricted: true },
     env: { FOO: "bar", BAZ: "qux=1" },
   })
 })
 
-test("workspaces create rejects both or neither of --project and --repo", async () => {
-  for (const argv of [
-    ["workspaces", "create"],
-    ["workspaces", "create", "--project", "p1", "--repo", "https://example.com/r.git"],
-  ]) {
-    const { code, err } = await runCli(argv)
-    assert.equal(code, 1)
-    assert.match(err, /exactly one of --project or --repo/)
+test("workspaces create accepts official-style project and repository aliases", async () => {
+  const project = await runCli(["workspaces", "create", "--project-id", "p1"])
+  assert.deepEqual(project.calls[0]!.body, { projectId: "p1" })
+
+  const repository = await runCli([
+    "workspaces", "create", "--repo-url", "https://github.com/acme/app.git",
+  ])
+  assert.deepEqual(repository.calls[0]!.body, { repositoryUrl: "https://github.com/acme/app.git" })
+})
+
+test("workspaces create rejects both project sources or neither outside a workspace", async () => {
+  const neither = await runCli(["workspaces", "create"])
+  assert.equal(neither.code, 1)
+  assert.match(neither.err, /needs --project or --repo outside/)
+
+  const both = await runCli([
+    "workspaces", "create", "--project", "p1", "--repo", "https://example.com/r.git",
+  ])
+  assert.equal(both.code, 1)
+  assert.match(both.err, /takes --project or --repo, not both/)
+})
+
+test("workspaces create infers the current project and reads an initial message file", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "conductor-cli-"))
+  const briefPath = join(directory, "brief.md")
+  await writeFile(briefPath, "Implement the feature\n")
+  const { code, calls } = await runCli([
+    "workspaces", "create", "--agent", "codex", "--message-file", briefPath,
+  ], {
+    env: { ...ENV, CONDUCTOR_WORKSPACE_ID: "current/workspace" },
+    responses: [
+      { payload: { id: "current/workspace", projectId: "p-current" } },
+      { status: 201, payload: { workspaceId: "w-new", sessionId: "s-new", deepLink: "conductor://w-new" } },
+    ],
+  })
+  assert.equal(code, 0)
+  assert.equal(calls[0]!.url, "https://api.conductor.build/v0/workspaces/current%2Fworkspace")
+  assert.deepEqual(calls[1]!.body, {
+    projectId: "p-current",
+    agent: "codex",
+    message: "Implement the feature\n",
+  })
+})
+
+test("workspace lifecycle commands can use the current workspace", async () => {
+  for (const verb of ["sleep", "unarchive"] as const) {
+    const { code, calls } = await runCli(["workspaces", verb], {
+      env: { ...ENV, CONDUCTOR_WORKSPACE_ID: "w/current" },
+    })
+    assert.equal(code, 0)
+    assert.equal(calls[0]!.url, `https://api.conductor.build/v0/workspaces/w%2Fcurrent/${verb}`)
+    assert.equal(calls[0]!.method, "POST")
   }
 })
 
-test("sessions create requires --workspace and --agent, maps --fast", async () => {
+test("workspace rename accepts --name and defaults to the current workspace", async () => {
+  const { code, calls } = await runCli(["workspaces", "rename", "--name", "new-name"], {
+    env: { ...ENV, CONDUCTOR_WORKSPACE_ID: "w-current" },
+  })
+  assert.equal(code, 0)
+  assert.equal(calls[0]!.url, "https://api.conductor.build/v0/workspaces/w-current/rename")
+  assert.deepEqual(calls[0]!.body, { name: "new-name" })
+})
+
+test("sessions create requires a workspace outside Conductor and maps --fast", async () => {
   const missing = await runCli(["sessions", "create", "--agent", "claude"])
   assert.equal(missing.code, 1)
-  assert.match(missing.err, /--workspace and --agent/)
+  assert.match(missing.err, /requires --workspace outside/)
 
   const { calls } = await runCli([
     "sessions", "create", "--workspace", "w1", "--agent", "codex", "--model", "gpt-5.6-sol", "--fast",
@@ -174,6 +292,37 @@ test("sessions create omits fastMode unless --fast is supplied", async () => {
   ])
   assert.deepEqual(calls[0]!.body, { workspaceId: "w1", agent: "cursor", model: "grok-4.5" })
   assert.ok(!("fastMode" in calls[0]!.body))
+})
+
+test("sessions create uses the current workspace and sends an idempotent initial message", async () => {
+  const { code, calls } = await runCli([
+    "sessions", "create", "--agent", "claude", "--message", "review this", "--message-id", "turn-1",
+  ], {
+    env: { ...ENV, CONDUCTOR_WORKSPACE_ID: "w-current" },
+  })
+  assert.equal(code, 0)
+  assert.deepEqual(calls[0]!.body, {
+    workspaceId: "w-current",
+    agent: "claude",
+    messageId: "turn-1",
+    message: "review this",
+  })
+})
+
+test("sessions list includes archived sessions and aggregates every page", async () => {
+  const { code, calls, out } = await runCli([
+    "sessions", "list", "--include-archived", "--all", "--json",
+  ], {
+    env: { ...ENV, CONDUCTOR_WORKSPACE_ID: "w1" },
+    responses: [
+      { payload: { data: [{ id: "s1" }], offset: 0, hasMore: true } },
+      { payload: { data: [{ id: "s2" }], offset: 1, hasMore: false } },
+    ],
+  })
+  assert.equal(code, 0)
+  assert.equal(calls[0]!.url, "https://api.conductor.build/v0/workspaces/w1/sessions?includeArchived=true&limit=100&offset=0")
+  assert.equal(calls[1]!.url, "https://api.conductor.build/v0/workspaces/w1/sessions?includeArchived=true&limit=100&offset=1")
+  assert.deepEqual(JSON.parse(out).data, [{ id: "s1" }, { id: "s2" }])
 })
 
 test("messages send posts inline text and optional message id", async () => {
@@ -197,6 +346,15 @@ test("messages send reads --file and stdin fallbacks", async () => {
   const empty = await runCli(["messages", "send", "s1"])
   assert.equal(empty.code, 1)
   assert.match(empty.err, /non-empty message/)
+})
+
+test("messages send accepts official-style flags and forwards channel", async () => {
+  const { code, calls } = await runCli([
+    "messages", "send", "s1", "--message", "follow up", "--message-id", "turn-2", "--channel", "beta",
+  ])
+  assert.equal(code, 0)
+  assert.equal(calls[0]!.url, "https://api.conductor.build/v0/sessions/s1/messages?channel=beta")
+  assert.deepEqual(calls[0]!.body, { message: "follow up", messageId: "turn-2" })
 })
 
 test("messages list digests live content shapes and paginates with --all", async () => {
@@ -497,11 +655,26 @@ test("identifiers are URL-encoded in paths", async () => {
   assert.equal(calls[0]!.url, "https://api.conductor.build/v0/sessions/a%2Fb%20c/status")
 })
 
-test("missing CONDUCTOR_API_KEY fails with guidance", async () => {
+test("missing API credentials fail with guidance", async () => {
   const { code, err, calls } = await runCli(["projects", "list"], { env: {} })
   assert.equal(code, 1)
   assert.equal(calls.length, 0)
-  assert.match(err, /CONDUCTOR_API_KEY is not set/)
+  assert.match(err, /No API token found/)
+})
+
+test("credential precedence is flag, API key, then workspace token", async () => {
+  const workspaceToken = await runCli(["me"], { env: { CONDUCTOR_API_TOKEN: "workspace-token" } })
+  assert.equal(workspaceToken.calls[0]!.headers.authorization, "Bearer workspace-token")
+
+  const personalKey = await runCli(["me"], {
+    env: { CONDUCTOR_API_KEY: "personal-key", CONDUCTOR_API_TOKEN: "workspace-token" },
+  })
+  assert.equal(personalKey.calls[0]!.headers.authorization, "Bearer personal-key")
+
+  const explicit = await runCli(["me", "--token", "explicit-token"], {
+    env: { CONDUCTOR_API_KEY: "personal-key", CONDUCTOR_API_TOKEN: "workspace-token" },
+  })
+  assert.equal(explicit.calls[0]!.headers.authorization, "Bearer explicit-token")
 })
 
 test("API errors surface userMessage and exit 1", async () => {
